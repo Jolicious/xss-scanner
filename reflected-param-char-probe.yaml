@@ -1,0 +1,81 @@
+id: reflected-param-all-probe-xss
+
+info:
+  name: Reflected XSS - alternate HTML contexts (attribute breakout, script tag)
+  author: Jolicious
+  severity: medium
+  description: |
+    CANDIDATE detector for HTML contexts the generic payload set can miss: attribute
+    values (via quote breakout + event handler) and full script-tag injection.
+    Browser-encoded payloads only; alerts only on raw executable reflection.
+    Redirects and encoded echoes ignored. Confirm with xss-headless-verify.yaml.
+  reference:
+    - https://owasp.org/www-community/attacks/xss/
+  tags: xss,rxss,reflection,candidate,dast
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}"
+
+    headers:
+      User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:149.0) Gecko/20100101 Firefox/149.0"
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+      Cache-Control: "no-cache"
+
+    fuzzing:
+      - part: query
+        type: replace
+        mode: single
+        fuzz:
+          - '%22%20onmouseover%3Dalert(1)%20x%3D%22'
+          - '%27%20onmouseover%3Dalert(1)%20x%3D%27'
+          - '%3C%2Fscript%3E%3Cscript%3Ealert(1)%3C%2Fscript%3E'
+          - '%22%3E%3Cscript%3Ealert(1)%3C%2Fscript%3E'
+
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - '" onmouseover=alert(1) x="'
+          - "' onmouseover=alert(1) x='"
+          - '</script><script>alert(1)</script>'
+          - '"><script>alert(1)</script>'
+
+      - type: status
+        negative: true
+        status:
+          - 301
+          - 302
+          - 303
+          - 307
+          - 308
+
+      - type: word
+        part: header
+        words:
+          - "text/html"
+
+      - type: word
+        part: body
+        negative: true
+        words:
+          - "%20onmouseover"
+          - "&quot; onmouseover"
+          - "&#34; onmouseover"
+          - "&#39; onmouseover"
+          - "&lt;/script"
+          - "\\u003cscript"
+          # backslash-escaped quote is not a breakout
+          - "\\\" onmouseover"
+          - "\\' onmouseover"
+          - "\\\"><script"
+
+    extractors:
+      - type: regex
+        part: body
+        name: context
+        group: 0
+        regex:
+          - '.{0,100}(?:onmouseover=alert|</script><script>alert|"><script>alert).{0,100}'

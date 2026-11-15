@@ -1,0 +1,54 @@
+id: xss-headless-verify
+
+info:
+  name: XSS confirmation via headless browser execution
+  author: Jolicious
+  severity: high
+  description: |
+    CONFIRMATION step for candidate URLs produced by the reflected-* templates.
+
+    The candidate URL carries a payload that builds a random token with
+    String.fromCharCode and assigns it to document.body.dataset.pwn.
+
+    The matcher requires the serialized DOM form `data-pwn="XSS_CONFIRMED_<12hex>"`,
+    so a plain reflection of the payload cannot match: the attribute value only
+    exists if the script executed. The exec-proof extractor returns the exact token,
+    and xss-queue.py requires extractor-name == exec-proof, an exact token match,
+    type == headless, and the record URL equal to that attempt's injected URL.
+
+    Note: Nuclei 3.11.1 does not reliably expose `script` action return values to
+    extractors, so the proof is read from the post-execution serialized DOM.
+  tags: xss,rxss,headless,verify
+
+headless:
+  - steps:
+      - action: navigate
+        args:
+          url: "{{BaseURL}}"
+      - action: waitload
+      - action: sleep
+        args:
+          duration: 2
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "data-pwn="
+      - type: regex
+        part: body
+        regex:
+          - 'data-pwn="XSS_CONFIRMED_[0-9a-f]{12}"'
+    extractors:
+      - type: regex
+        part: body
+        name: exec-proof
+        group: 0
+        regex:
+          - 'XSS_CONFIRMED_[0-9a-f]{12}'
+      - type: regex
+        part: body
+        name: dom-context
+        group: 0
+        regex:
+          - '.{0,60}data-pwn="XSS_CONFIRMED_[0-9a-f]{12}".{0,20}'

@@ -1,0 +1,86 @@
+id: xss-js-string-candidate
+
+info:
+  name: Reflected XSS - JavaScript string context (query params, browser-encoded)
+  author: Jolicious
+  severity: medium
+  description: |
+    CANDIDATE detector for payloads that break out of a JavaScript string literal
+    inside an inline <script>. Requires a <script> block AND a raw quote-driven
+    breakout (  ";alert(1)//  or  ';alert(1)//  ). Because the quote type must match
+    the surrounding string, this is context-sensitive: confirm every hit with
+    xss-headless-verify.yaml.
+    Redirects, non-HTML and escaped/encoded echoes are ignored.
+  reference:
+    - https://owasp.org/www-community/attacks/xss/
+  tags: xss,rxss,reflection,candidate,dast
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}"
+
+    headers:
+      User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:149.0) Gecko/20100101 Firefox/149.0"
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+      Cache-Control: "no-cache"
+
+    fuzzing:
+      - part: query
+        type: replace
+        mode: single
+        fuzz:
+          - '%22%3Balert(1)%2F%2F'
+          - '%27%3Balert(1)%2F%2F'
+          - '%3C%2Fscript%3E%3Csvg%2Fonload%3Dalert(1)%3E'
+
+    matchers-condition: and
+    matchers:
+      # must actually be inside an inline script block
+      - type: word
+        part: body
+        words:
+          - "<script"
+
+      # raw quote breakout (server decoded and did NOT escape the quote)
+      - type: word
+        part: body
+        words:
+          - '";alert(1)//'
+          - "';alert(1)//"
+          - '</script><svg/onload=alert(1)>'
+
+      - type: status
+        negative: true
+        status:
+          - 301
+          - 302
+          - 303
+          - 307
+          - 308
+
+      - type: word
+        part: header
+        words:
+          - "text/html"
+
+      # suppress escaped/encoded echoes ( \" ; \' ; entity ; percent )
+      - type: word
+        part: body
+        negative: true
+        words:
+          - "%22%3Balert"
+          - "%27%3Balert"
+          - "\\\";alert"
+          - "\\';alert"
+          - "&quot;;alert"
+          - "&#34;;alert"
+          - "&#39;;alert"
+
+    extractors:
+      - type: regex
+        part: body
+        name: context
+        group: 0
+        regex:
+          - '.{0,100}(?:";alert|&apos;;alert|</script><svg).{0,100}'

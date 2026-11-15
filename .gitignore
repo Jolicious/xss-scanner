@@ -1,0 +1,21 @@
+# run artifacts and transfers
+*.zip
+*.b64
+*.log
+queue.db
+queue.db-*
+run*/
+mtest*/
+mcheck*/
+multi*/
+xss-scan-*/
+archive-*/
+
+# scratch
+test.py
+
+# secrets: never commit cookies/tokens or notify config
+.env
+*.cookie
+token.txt
+provider-config.yaml

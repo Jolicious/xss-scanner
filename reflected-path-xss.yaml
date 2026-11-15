@@ -1,0 +1,71 @@
+id: reflected-xss-executable
+
+info:
+  name: Reflected XSS - URL path, HTML context (browser-encoded)
+  author: Jolicious
+  severity: medium
+  description: |
+    CANDIDATE detector. Injects URL-encoded payloads into the request path (the form
+    a browser sends) and alerts only on raw executable HTML tag breakout. Redirects,
+    non-HTML and encoded echoes ignored. Confirm with xss-headless-verify.yaml.
+  reference:
+    - https://owasp.org/www-community/attacks/xss/
+  tags: xss,rxss,reflection,candidate,dast
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/%22%3E%3Csvg%2Fonload%3Dalert(1)%3E"
+      - "{{BaseURL}}/%27%3E%3Csvg%2Fonload%3Dalert(1)%3E"
+      - "{{BaseURL}}/%3C%2Fscript%3E%3Csvg%2Fonload%3Dalert(1)%3E"
+      - "{{BaseURL}}/%22%3E%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E"
+
+    headers:
+      User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:149.0) Gecko/20100101 Firefox/149.0"
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+      Cache-Control: "no-cache"
+
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - '"><svg/onload=alert(1)>'
+          - "'><svg/onload=alert(1)>"
+          - '</script><svg/onload=alert(1)>'
+          - '"><img src=x onerror=alert(1)>'
+
+      - type: status
+        negative: true
+        status:
+          - 301
+          - 302
+          - 303
+          - 307
+          - 308
+
+      - type: word
+        part: header
+        words:
+          - "text/html"
+
+      - type: word
+        part: body
+        negative: true
+        words:
+          - "%3Csvg"
+          - "%3csvg"
+          - "&lt;svg"
+          - "\\u003csvg"
+          - "&#60;svg"
+          - "\\\"><svg"
+          - "\\\"><img"
+          - "\\'><svg"
+
+    extractors:
+      - type: regex
+        part: body
+        name: context
+        group: 0
+        regex:
+          - '.{0,100}(?:"><svg|&apos;><svg|</script><svg|"><img).{0,100}'

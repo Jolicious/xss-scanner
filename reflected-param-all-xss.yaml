@@ -1,0 +1,88 @@
+id: reflected-param-all-xss
+
+info:
+  name: Reflected XSS - HTML context (query params, browser-encoded)
+  author: Jolicious
+  severity: medium
+  description: |
+    CANDIDATE detector for HTML-context reflected XSS. Replaces each query parameter
+    with URL-encoded payloads (exactly what a browser sends) and alerts only when the
+    server decodes them and re-emits a raw HTML tag-breakout token such as
+    "><svg/onload=alert(1)> or </script><svg/onload=alert(1)>.
+
+    This deliberately ignores: 3xx responses (browsers do not execute a redirect
+    body), non-HTML responses, and encoded/HTML-entity echoes. It does NOT attempt
+    JS-string contexts (see xss-js-string-candidate.yaml). Confirm every hit with
+    xss-headless-verify.yaml before reporting.
+  reference:
+    - https://owasp.org/www-community/attacks/xss/
+  tags: xss,rxss,reflection,candidate,dast
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}"
+
+    headers:
+      User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:149.0) Gecko/20100101 Firefox/149.0"
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+      Accept-Language: "en-US,en;q=0.5"
+      Cache-Control: "no-cache"
+
+    fuzzing:
+      - part: query
+        type: replace
+        mode: single
+        fuzz:
+          - '%22%3E%3Csvg%2Fonload%3Dalert(1)%3E'
+          - '%27%3E%3Csvg%2Fonload%3Dalert(1)%3E'
+          - '%3C%2Fscript%3E%3Csvg%2Fonload%3Dalert(1)%3E'
+          - '%22%3E%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E'
+
+    matchers-condition: and
+    matchers:
+      # raw, executable HTML tag breakout (server decoded and did NOT escape)
+      - type: word
+        part: body
+        words:
+          - '"><svg/onload=alert(1)>'
+          - "'><svg/onload=alert(1)>"
+          - '</script><svg/onload=alert(1)>'
+          - '"><img src=x onerror=alert(1)>'
+
+      - type: status
+        negative: true
+        status:
+          - 301
+          - 302
+          - 303
+          - 307
+          - 308
+
+      - type: word
+        part: header
+        words:
+          - "text/html"
+
+      - type: word
+        part: body
+        negative: true
+        words:
+          - "%3Csvg"
+          - "%3csvg"
+          - "&lt;svg"
+          - "\\u003csvg"
+          - "&#60;svg"
+          - "&#x3c;svg"
+          # backslash-escaped quote (e.g. JSON: "x":"\"><svg...") is NOT a breakout
+          - "\\\"><svg"
+          - "\\\"><img"
+          - "\\'><svg"
+
+    extractors:
+      - type: regex
+        part: body
+        name: context
+        group: 0
+        regex:
+          - '.{0,100}(?:"><svg|&apos;><svg|</script><svg|"><img).{0,100}'
