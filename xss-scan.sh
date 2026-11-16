@@ -450,7 +450,13 @@ run_per_host() {
   wait "$PH_SPID" 2>/dev/null
   printf '\n' 
 
-  rm -rf "$hostf" "$parts"
+  rm -rf "$hostf"
+  # keep any part dir that still holds unfinished work so --continue can resume
+  if [ -d "$parts" ] && [ -n "$(ls -A "$parts" 2>/dev/null)" ]; then
+    say "kept unfinished state: $(find "$parts" -maxdepth 1 -mindepth 1 -printf '%f ' 2>/dev/null)"
+  else
+    rm -rf "$parts"
+  fi
   echo "[*] per-host done: $(wc -l < "$OUT/hosts-done.txt" | tr -d ' ')/$total host(s) complete" >&3
   echo "[*] findings: $(wc -l < "$OUT/results.jsonl" | tr -d ' ')  confirmed: $(wc -l < "$OUT/confirmed.jsonl" | tr -d ' ')" >&3
   DONE_FIND=$(num "$(wc -l < "$OUT/results.jsonl" 2>/dev/null || echo 0)")
