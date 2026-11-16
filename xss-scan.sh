@@ -775,9 +775,9 @@ if [ "$RATE_SET" = 0 ]; then
   if [ "${PER_HOST_CHILD:-0}" = 1 ]; then
     # single-domain crawl+scan: slower on purpose, aggressive rates make sites
     # throttle and the crawl then returns almost nothing
-    [ -z "${RATE_ENV:-}" ] && RATE=10
-    [ -z "${CONC_ENV:-}" ] && CONC=3
-    THREADS=20
+    [ -z "${RATE_ENV:-}" ] && RATE=5
+    [ -z "${CONC_ENV:-}" ] && CONC=2
+    THREADS=10
   elif [ "$N_HOSTS" -ge 1000 ]; then RATE=25; CONC=8;  THREADS=60
   elif [ "$N_HOSTS" -ge 200 ]; then RATE=40; CONC=10; THREADS=80
   else                              RATE=60; CONC=12; THREADS=50
@@ -1220,7 +1220,7 @@ if [ "$DO_JS" = 1 ]; then
   JS_REV=$(python3 "$QHELPER" meta-get "$Q" js_rev 2>/dev/null || echo "")
   [ "$JS_REV" = "3" ] || REDISCOVER=1
   if [ "$REDISCOVER" = 1 ] || [ "$JSD" != "done" ]; then
-    JS_CONC="${JS_CONC:-8}"
+    JS_CONC="${JS_CONC:-4}"
     MAX_JS="${MAX_JS:-4000}"
     MAX_JS_ROUNDS="${MAX_JS_ROUNDS:-3}"
     MAX_JS_URLS="${MAX_JS_URLS:-50000}"
@@ -1287,9 +1287,9 @@ host_progress
 
 # crawl is done: raise the scan rate (the damping that needs 10 rps applies to
 # crawling, not to the batch scanner)
-if [ "${PER_HOST_CHILD:-0}" = 1 ] && [ -z "${RATE_ENV:-}" ] && [ "$RATE" -lt 25 ]; then
-  RATE=25
-  echo "[*] scan rate raised to 25 rps after crawl"
+if [ "${PER_HOST_CHILD:-0}" = 1 ] && [ -z "${RATE_ENV:-}" ] && [ "$RATE" -lt 12 ]; then
+  RATE=12
+  echo "[*] scan rate raised to  rps after crawl"
 fi
 
 # ---- 6. plan work queues ----
@@ -1309,7 +1309,7 @@ fi
 # body probing is best-effort: a slow CGI must not stall the stage forever
 export PROBE_BUDGET="${PROBE_BUDGET:-3600}"
 if [ "${PER_HOST_CHILD:-0}" = 1 ]; then
-  export BODY_CONC="${BODY_CONC:-4}"
+  export BODY_CONC="${BODY_CONC:-2}"
 else
   export BODY_CONC="${BODY_CONC:-6}"
 fi
