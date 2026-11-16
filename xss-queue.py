@@ -1543,6 +1543,11 @@ def cmd_js_extract(js_dir, limit="0"):
                 continue  # JSON-escaped query separators are not real literals
             u = u.replace("&amp;", "&").replace("&#38;", "&")
             out.add(u)
+        # bare fragments: "petprofile/v1/pets", "users/v2/search"
+        for m in re.finditer(r"""["'`]([A-Za-z0-9_.-]+/v[0-9]+/[A-Za-z0-9_./%?=&-]{1,140})["'`]""", body):
+            frag = m.group(1)
+            for prefix in ("/api/", "/"):
+                out.add(urljoin(origin, prefix + frag))
         for m in _JS_PATH_RE.finditer(body):
             raw = m.group(1)
             if len(raw) > 500 or _JS_SKIP_RE.search(raw):
