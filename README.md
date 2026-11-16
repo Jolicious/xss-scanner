@@ -100,6 +100,32 @@ Without `--per-host` one pipeline covers the whole list.
 | verification | on when a browser is present |
 | notify | on when `~/.config/notify/provider-config.yaml` exists |
 
+## Useful flags
+
+```
+--per-host --per-host-jobs N    run N hosts in parallel (default 3)
+--cookie-file PATH              cookie from file (handles quotes/CRLF)
+--verify / --no-verify          headless execution proof
+--api-reflections               report JSON/text API echoes as information
+--no-forms-post                 skip POST form probing
+--retry-failed                  requeue failures on resume
+```
+
+Per-host mode runs one httpx pass over the whole list first, then only alive
+hosts get a pipeline; dead hosts are skipped.
+
+## Notification accuracy
+
+Candidates are notified only after context filtering:
+
+| reflection | context | reported |
+|---|---|---|
+| raw payload in HTML `<script>`/markup | `html` | candidate -> headless confirm |
+| entity/JS-escaped (`&#x27;`, `\u0027`) | `escaped` | `escaped.txt` only |
+| inside `__NEXT_DATA__` / JSON script | `json_data` | dropped |
+| `text/plain` / JSON API echo | `non_html` | dropped (see `--api-reflections`) |
+| 429 / 503 | `blocked` | retried next pass |
+
 ## Notifications
 
 Per batch, deduplicated per endpoint + parameter:

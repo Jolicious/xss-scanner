@@ -120,13 +120,14 @@ VERIFY_TIMEOUT="${VERIFY_TIMEOUT:-900}"
 DO_GAU=1; DO_CRAWL=1; DO_VERIFY=0; DO_FORMS=1; FORMS_POST=1; DO_JS=1
 VERIFY_EXPLICIT=0; RATE_SET=0; CONC_SET=0; DISK_SET=0; NOTIFY_EXPLICIT=0
 COMPACT=0; RESUME=1; RETRY_FAILED=0; STRICT=1; REDISCOVER=0
-SILENT=0; PER_HOST=0; PER_HOST_CHUNK=1; DO_SITEMAP=1
+SILENT=0; PER_HOST=0; PER_HOST_CHUNK=1; PER_HOST_JOBS=3; DO_SITEMAP=1; API_REFLECT=0
 REVERIFY=0; FORCE_CONFIG=0; AMEND_LIMITS=0; DO_REPORT=1
 NOTIFY=0; NOTIFY_SUMMARY=0; NOTIFY_LIVE=1; NOTIFY_SENT_ANY=0; NOTIFY_IDS=(); NOTIFY_CANDIDATES=1
 NOTIFY_CONFIG="${NOTIFY_CONFIG:-$HOME/.config/notify/provider-config.yaml}"
 JSON_FILE=""
-HDRS=(); COOKIE=""; TOKEN=""; TOKEN_FILE=""
+HDRS=(); COOKIE=""; COOKIE_FILE=""; TOKEN=""; TOKEN_FILE=""
 
+num() { case "${1:-}" in ''|*[!0-9]*) echo 0;; *) echo "$1";; esac; }
 die() { echo "[-] $*" >&2; [ "${SILENT:-0}" = 1 ] && echo "[-] $*" >&3; exit 1; }
 warn() { echo "[!] $*" >&2; }
 # findings go to the terminal even when chatter is redirected
@@ -144,6 +145,7 @@ while [ $# -gt 0 ]; do
     -c|--conc)        CONC="${2:-}"; CONC_SET=1; shift 2;;
     -H|--header)      HDRS+=("${2:-}"); shift 2;;
     -b|--cookie)      COOKIE="${2:-}"; shift 2;;
+    --cookie-file)    COOKIE_FILE="${2:-}"; shift 2;;
     -T|--token)       TOKEN="${2:-}"; shift 2;;
     --token-file)     TOKEN_FILE="${2:-}"; shift 2;;
     --crawl)          DO_CRAWL=1; shift;;
@@ -151,9 +153,11 @@ while [ $# -gt 0 ]; do
     --no-gau)         DO_GAU=0; shift;;
     --no-js)          DO_JS=0; shift;;
     --no-sitemap)     DO_SITEMAP=0; shift;;
+    --api-reflections) API_REFLECT=1; shift;;
     -q|--silent|--quiet) SILENT=1; shift;;
     --per-host)       PER_HOST=1; shift;;
     --per-host-chunk) PER_HOST=1; PER_HOST_CHUNK="${2:-1}"; shift 2;;
+    --per-host-jobs)  PER_HOST_JOBS="${2:-3}"; shift 2;;
     --rediscover)     REDISCOVER=1; shift;;
     --batch-size)     BATCH_SIZE="${2:-}"; shift 2;;
     --path-batch)     PATH_BATCH="${2:-}"; shift 2;;
@@ -286,18 +290,33 @@ run_per_host() {
     [ -f "$OUT/$f" ] || : > "$OUT/$f"
   done
   echo "[*] per-host mode: $total host(s), $chunk per batch, one run dir reused"
-  split -l "$chunk" -d -a 5 "$hostf/hosts.txt" "$hostf/h."
-  idx=0
-  for cf in "$hostf"/h.*; do
-    [ -s "$cf" ] || { rm -f "$cf"; continue; }
-    idx=$((idx + 1))
-    part="$parts/p$idx"
-    if [ -f "$OUT/hosts-done.txt" ] && grep -qxF "$(head -1 "$cf")" "$OUT/hosts-done.txt"; then
-      say "skip (already complete): $(tr '\n' ' ' < "$cf")"
+
+  # one httpx pass over the entire list, then only alive hosts get a pipeline
+  echo "[*] alive probe (httpx over $total host(s))"
+  HA=(-l "$hostf/hosts.txt" -silent -threads "${THREADS:-50}")
+  [ -n "$COOKIE" ] && HA+=(-H "Cookie: $COOKIE")
+  timeout --foreground "${STEP_TIMEOUT:-1800}" "$HTTPX_BIN" "${HA[@]}" \
+    -o "$hostf/alive.txt" 2>>"$OUT/logs/per-host.log" || true
+  ALIVE_BATCH=$(num "$(wc -l < "$hostf/alive.txt" 2>/dev/null || echo 0)")
+  echo "[*] alive: $ALIVE_BATCH/$total — only these get a pipeline"
+  [ "$ALIVE_BATCH" -gt 0 ] || die "no alive hosts in $IN (see logs/per-host.log)"
+  total="$ALIVE_BATCH"
+  split -l "$chunk" -d -a 5 "$hostf/alive.txt" "$hostf/h."
+  PH_JOBS="${PER_HOST_JOBS:-3}"
+  case "$PH_JOBS" in ''|*[!0-9]*) PH_JOBS=3;; esac
+  [ "$PH_JOBS" -ge 1 ] || PH_JOBS=1
+  echo "[*] per-host parallel: $PH_JOBS host(s) at a time"
+
+  ph_one() {
+    local cf="$1" part CF_HOST prc PTMO
+    [ -s "$cf" ] || { rm -f "$cf"; return 0; }
+    part="$parts/$(basename "$cf")"
+    CF_HOST=$(head -1 "$cf" | sed -E 's#^[a-z][a-z0-9+.-]*://##; s#[/?#].*$##')
+    if [ -f "$OUT/hosts-done.txt" ] && grep -qxF "$CF_HOST" "$OUT/hosts-done.txt"; then
+      say "skip (already complete): $CF_HOST"
       rm -f "$cf"
-      continue
+      return 0
     fi
-    # a leftover part directory is resumed, never wiped
     PTMO="${PER_HOST_TIMEOUT:-0}"
     if [ "$PTMO" -gt 0 ]; then
       timeout --foreground "$PTMO" \
@@ -311,22 +330,32 @@ run_per_host() {
       prc=$?
     fi
     if [ -d "$part" ]; then
-      if python3 "$QHELPER" merge-run "$part" "$OUT" >/dev/null 2>>"$OUT/logs/merge.log"; then
+      # merges append to shared files: serialise them
+      if flock "$OUT/.merge.lock" python3 "$QHELPER" merge-run "$part" "$OUT" \
+           >/dev/null 2>>"$OUT/logs/merge.log"; then
         rm -rf "$part"
       else
-        # never throw away a finished scan because the merge step failed
         mkdir -p "$OUT/.failed-parts"
-        mv -f "$part" "$OUT/.failed-parts/p$idx" 2>/dev/null || true
-        warn "merge failed for $(tr '\n' ' ' < "$cf"); kept at $OUT/.failed-parts/p$idx"
+        mv -f "$part" "$OUT/.failed-parts/$(basename "$cf")" 2>/dev/null || true
+        warn "merge failed for $(tr '\n' ' ' < "$cf"); kept in $OUT/.failed-parts"
       fi
     fi
-    say "hosts complete: $(wc -l < "$OUT/hosts-done.txt" | tr -d ' ')/$total ($(tr '\n' ' ' < "$cf"))"
+    say "hosts complete: $(wc -l < "$OUT/hosts-done.txt" | tr -d ' ')/$total ($CF_HOST)"
     rm -f "$cf"
+  }
+
+  for cf in "$hostf"/h.*; do
+    [ -s "$cf" ] || { rm -f "$cf"; continue; }
+    while [ "$(jobs -rp | wc -l)" -ge "$PH_JOBS" ]; do sleep 1; done
+    ph_one "$cf" &
   done
+  wait
+
   rm -rf "$hostf" "$parts"
   echo "[*] per-host done: $(wc -l < "$OUT/hosts-done.txt" | tr -d ' ')/$total host(s) complete" >&3
   echo "[*] findings: $(wc -l < "$OUT/results.jsonl" | tr -d ' ')  confirmed: $(wc -l < "$OUT/confirmed.jsonl" | tr -d ' ')" >&3
-  if [ "$NOTIFY" = 1 ] && [ "$(wc -l < "$OUT/results.jsonl" 2>/dev/null || echo 0)" -gt 0 ] \
+  DONE_FIND=$(num "$(wc -l < "$OUT/results.jsonl" 2>/dev/null || echo 0)")
+  if [ "$NOTIFY" = 1 ] && [ "$DONE_FIND" -gt 0 ] \
      && command -v notify >/dev/null 2>&1; then
     local dn fn cn el sum nid nargs=()
     dn=$(wc -l < "$OUT/hosts-done.txt" | tr -d ' ')
@@ -526,9 +555,26 @@ host_progress() {
   return 0
 }
 
+if [ -n "$COOKIE_FILE" ]; then
+  [ -r "$COOKIE_FILE" ] || die "--cookie-file not readable: $COOKIE_FILE"
+  COOKIE="$(tr -d '\r\n' < "$COOKIE_FILE")"
+fi
+
 # ---- canonical auth headers: single source for every tool ----
 AUTH_HDRS=()
 [ -n "$COOKIE" ] && AUTH_HDRS+=("Cookie: $COOKIE")
+
+# APIs often answer text/plain to a generic client but text/html to a browser;
+# without a browser Accept header a real reflection looks non-executable.
+_have_ua=0; _have_accept=0
+for _h in ${AUTH_HDRS[@]+"${AUTH_HDRS[@]}"} ${HDRS[@]+"${HDRS[@]}"}; do
+  case "$(printf '%s' "$_h" | tr 'A-Z' 'a-z')" in
+    user-agent:*) _have_ua=1;;
+    accept:*)     _have_accept=1;;
+  esac
+done
+[ "$_have_ua" = 0 ] && AUTH_HDRS+=("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0")
+[ "$_have_accept" = 0 ] && AUTH_HDRS+=("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 
 # credential precedence: env > file > argv, and conflicting Authorization is fatal
 if [ -n "${XSS_TOKEN:-}" ]; then TOKEN="$XSS_TOKEN"; fi
@@ -1039,32 +1085,23 @@ if [ "$DO_CRAWL" = 1 ] && { [ "$REDISCOVER" = 1 ] || [ "$DISC" != "done" ]; }; t
 fi
 
 if [ "$DO_JS" = 1 ]; then
-  # JS bundles hide endpoints that no crawler follows: fetch what discovery
-  # already found and mine URL/API literals out of it.
+  # JS bundles hide endpoints that no crawler follows. One pass is not enough:
+  # a chunk references more chunks, so iterate until no new bundles appear.
   JSD=$(python3 "$QHELPER" discovery-status "$Q" js pages 2>/dev/null)
   if [ "$REDISCOVER" = 1 ] || [ "$JSD" != "done" ]; then
-    python3 "$QHELPER" list-js "$Q" "$OUT/.js-urls.txt" > "$OUT/.js-count" 2>/dev/null \
-      || echo 0 > "$OUT/.js-count"
-    JSN=$(cat "$OUT/.js-count" 2>/dev/null || echo 0)
-    case "${JSN:-0}" in ''|*[!0-9]*) JSN=0;; esac
-    if [ "$JSN" -gt 0 ]; then
-      JS_CONC="${JS_CONC:-8}"
-      MAX_JS="${MAX_JS:-4000}"
-      JS_LIST="$OUT/.js-urls.txt"
-      if [ "$JSN" -gt "$MAX_JS" ]; then
-        warn "js mining: capping at $MAX_JS of $JSN bundle(s)"
-        head -n "$MAX_JS" "$JS_LIST" > "$OUT/.js-urls.lim.txt"
-        JS_LIST="$OUT/.js-urls.lim.txt"
-      fi
-      echo "[*] js mining: $(wc -l < "$JS_LIST" | tr -d ' ') bundle(s), conc=$JS_CONC"
-      rm -rf "$OUT/.js-dl"; mkdir -p "$OUT/.js-dl"
-      { :; } > "$OUT/.js-hdrs.txt"
-      i=0
-      while [ "$i" -lt "${#NHDR[@]}" ]; do
-        printf '%s\n' "${NHDR[$((i+1))]}" >> "$OUT/.js-hdrs.txt"
-        i=$((i + 2))
-      done
-      cat > "$OUT/.js-fetch.sh" <<'EOS'
+    JS_CONC="${JS_CONC:-8}"
+    MAX_JS="${MAX_JS:-4000}"
+    MAX_JS_ROUNDS="${MAX_JS_ROUNDS:-3}"
+    MAX_JS_URLS="${MAX_JS_URLS:-50000}"
+    rm -rf "$OUT/.js-dl"; mkdir -p "$OUT/.js-dl"
+    : > "$OUT/.js-done.txt"
+    { :; } > "$OUT/.js-hdrs.txt"
+    i=0
+    while [ "$i" -lt "${#NHDR[@]}" ]; do
+      printf '%s\n' "${NHDR[$((i+1))]}" >> "$OUT/.js-hdrs.txt"
+      i=$((i + 2))
+    done
+    cat > "$OUT/.js-fetch.sh" <<'EOS'
 #!/bin/bash
 outdir="$1"; url="$2"; hdrfile="$3"
 safe=$(printf '%s' "$url" | sha1sum | cut -c1-16)
@@ -1072,25 +1109,40 @@ args=()
 if [ -s "$hdrfile" ]; then
   while IFS= read -r h; do [ -n "$h" ] && args+=(-H "$h"); done < "$hdrfile"
 fi
-{ printf '#SRC %s\n' "$url"; curl -sk --max-time 15 -A "Mozilla/5.0" ${args[@]+"${args[@]}"} "$url"; } \
+{ printf '#SRC %s\n' "$url"; curl -sk --max-time 20 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0" ${args[@]+"${args[@]}"} "$url"; } \
   > "$outdir/$safe.txt" 2>/dev/null
 echo "$?" >> "$outdir/rc.txt"
 EOS
-      chmod +x "$OUT/.js-fetch.sh"
-      xargs -P "$JS_CONC" -I{} bash "$OUT/.js-fetch.sh" "$OUT/.js-dl" {} "$OUT/.js-hdrs.txt" < "$JS_LIST"
-      MAX_JS_URLS="${MAX_JS_URLS:-50000}"
+    chmod +x "$OUT/.js-fetch.sh"
+    JROUND=0
+    while [ "$JROUND" -lt "$MAX_JS_ROUNDS" ]; do
+      JROUND=$((JROUND + 1))
+      python3 "$QHELPER" list-js "$Q" "$OUT/.js-all.txt" >/dev/null 2>&1 || : > "$OUT/.js-all.txt"
+      if [ -s "$OUT/.js-done.txt" ]; then
+        grep -vxF -f "$OUT/.js-done.txt" "$OUT/.js-all.txt" > "$OUT/.js-urls.txt" 2>/dev/null \
+          || cp "$OUT/.js-all.txt" "$OUT/.js-urls.txt"
+      else
+        cp "$OUT/.js-all.txt" "$OUT/.js-urls.txt"
+      fi
+      if [ "${MAX_JS:-4000}" -gt 0 ]; then
+        head -n "$MAX_JS" "$OUT/.js-urls.txt" > "$OUT/.js-urls.lim.txt"
+        mv -f "$OUT/.js-urls.lim.txt" "$OUT/.js-urls.txt"
+      fi
+      NEWN=$(wc -l < "$OUT/.js-urls.txt" | tr -d ' ')
+      case "${NEWN:-0}" in ''|*[!0-9]*) NEWN=0;; esac
+      [ "$NEWN" -gt 0 ] || break
+      echo "[*] js mining round $JROUND: $NEWN new bundle(s), conc=$JS_CONC"
+      xargs -P "$JS_CONC" -I{} bash "$OUT/.js-fetch.sh" "$OUT/.js-dl" {} "$OUT/.js-hdrs.txt" < "$OUT/.js-urls.txt"
+      cat "$OUT/.js-urls.txt" >> "$OUT/.js-done.txt"
       python3 "$QHELPER" js-extract "$OUT/.js-dl" "$MAX_JS_URLS" > "$URLTMP" 2>>"$LOGS/js.log"
       JRC=$?
-      irc=0
-      if [ -s "$URLTMP" ]; then ingest < "$URLTMP"; irc=$?; fi
+      if [ -s "$URLTMP" ]; then ingest < "$URLTMP" 2>>"$LOGS/js.log" || true; fi
       : > "$URLTMP"
       trim_log "$LOGS/js.log" 2097152
-      [ "$JRC" -eq 0 ] && python3 "$QHELPER" discovery-set "$Q" js pages done 0 \
-        || { warn "js-extract rc=$JRC"; python3 "$QHELPER" discovery-set "$Q" js pages failed "$JRC"; }
-      rm -rf "$OUT/.js-dl" "$OUT/.js-fetch.sh"
-    else
-      python3 "$QHELPER" discovery-set "$Q" js pages done 0
-    fi
+      [ "$JRC" -eq 0 ] || { warn "js-extract rc=$JRC"; break; }
+    done
+    python3 "$QHELPER" discovery-set "$Q" js pages done 0
+    rm -rf "$OUT/.js-dl" "$OUT/.js-fetch.sh" "$OUT/.js-all.txt" "$OUT/.js-urls.txt"
   fi
 fi
 
@@ -1250,13 +1302,13 @@ while :; do
       host_progress
       if [ "$NOTIFY" = 1 ] && [ "$NOTIFY_LIVE" = 1 ] && [ -s "$BJ" ] \
          && { [ "$DO_VERIFY" = 0 ] || [ "${NOTIFY_CANDIDATES:-0}" = 1 ]; }; then
-        if notify_from_jsonl "$BJ" "$OUT/.notify-live.txt" \
-             "XSS CANDIDATES — not confirmed, verify manually (batch $BATCH_IDX)" \
-             "$OUT/.notify-pending.txt" cand \
-           && notify_file "$OUT/.notify-live.txt" "query batch $BATCH_IDX"; then
-          cat "$OUT/.notify-pending.txt" >> "$OUT/.notify-sent.txt" 2>/dev/null || true
+        NC=$(python3 "$QHELPER" new-candidates "$Q" "$OUT/.notify-live.txt" \
+               "$OUT/.cand-notified.id" "$OUT/.cand-notified.keys" 2>>"$LOGS/notify.log" || echo 0)
+        case "${NC:-0}" in ''|*[!0-9]*) NC=0;; esac
+        if [ "$NC" -gt 0 ] && notify_file "$OUT/.notify-live.txt" "query batch $BATCH_IDX"; then
+          cat "$OUT/.cand-notified.keys.pending" >> "$OUT/.cand-notified.keys" 2>/dev/null || true
         fi
-        rm -f "$OUT/.notify-pending.txt"
+        rm -f "$OUT/.cand-notified.keys.pending" "$OUT/.notify-live.txt"
         rm -f "$OUT/.notify-live.txt"
       fi
       rm -f "$OUT/.batch.$$.txt" "$BJ"
@@ -1321,13 +1373,13 @@ while :; do
     host_progress
     if [ "$NOTIFY" = 1 ] && [ "$NOTIFY_LIVE" = 1 ] && [ -s "$PJ" ] \
        && { [ "$DO_VERIFY" = 0 ] || [ "${NOTIFY_CANDIDATES:-0}" = 1 ]; }; then
-      if notify_from_jsonl "$PJ" "$OUT/.notify-live.txt" \
-           "XSS CANDIDATES — not confirmed, verify manually (path batch $PIDX)" \
-           "$OUT/.notify-pending.txt" cand \
-         && notify_file "$OUT/.notify-live.txt" "path batch $PIDX"; then
-        cat "$OUT/.notify-pending.txt" >> "$OUT/.notify-sent.txt" 2>/dev/null || true
+      NC=$(python3 "$QHELPER" new-candidates "$Q" "$OUT/.notify-live.txt" \
+             "$OUT/.cand-notified.id" "$OUT/.cand-notified.keys" 2>>"$LOGS/notify.log" || echo 0)
+      case "${NC:-0}" in ''|*[!0-9]*) NC=0;; esac
+      if [ "$NC" -gt 0 ] && notify_file "$OUT/.notify-live.txt" "path batch $PIDX"; then
+        cat "$OUT/.cand-notified.keys.pending" >> "$OUT/.cand-notified.keys" 2>/dev/null || true
       fi
-      rm -f "$OUT/.notify-pending.txt"
+      rm -f "$OUT/.cand-notified.keys.pending" "$OUT/.notify-live.txt"
       rm -f "$OUT/.notify-live.txt"
     fi
     rm -f "$OUT/.path.$$.txt" "$OUT/.path.$$.txt.ids" "$PJ"
@@ -1393,6 +1445,26 @@ while :; do
     # body probing is best-effort: never abort the whole scan on it
   fi
 done
+
+# ---- 9b. API reflections (JSON/text echo, manual review) ----
+if [ "$API_REFLECT" = 1 ]; then
+  RCOUNT=$(python3 "$QHELPER" api-reflect "$Q" "$OUT/reflections.txt" \
+             "${API_REFLECT_MAX:-300}" 2>>"$LOGS/reflect.log" || echo 0)
+  case "${RCOUNT:-0}" in ''|*[!0-9]*) RCOUNT=0;; esac
+  if [ "$RCOUNT" -gt 0 ]; then
+    echo "[*] api-reflect: $RCOUNT echoed endpoint(s) -> $OUT/reflections.txt"
+    [ "$SILENT" = 1 ] && sed 's/^/[+] /' "$OUT/reflections.txt" >&3
+    if [ "$NOTIFY" = 1 ] && command -v notify >/dev/null 2>&1; then
+      notify_file "$OUT/reflections.txt" "api reflections" \
+        || warn "reflection notify failed (see logs/notify.log)"
+    fi
+  fi
+fi
+
+# ---- 9c. escaped reflections (sink exists, markup encoded) ----
+ESC_N=$(python3 "$QHELPER" escaped-report "$Q" "$OUT/escaped.txt" 2>/dev/null || echo 0)
+case "${ESC_N:-0}" in ''|*[!0-9]*) ESC_N=0;; esac
+[ "$ESC_N" -gt 0 ] && echo "[*] escaped reflections: $ESC_N (see $OUT/escaped.txt)"
 
 # ---- 10. findings export ----
 python3 "$QHELPER" ctxfilter "$Q" 2>>"$LOGS/context.log" || true
@@ -1646,7 +1718,8 @@ PY
   fi
 fi
 
-if [ "$NOTIFY" = 1 ] && [ "$PER_HOST" = 0 ] && [ "${TOTAL:-0}" -gt 0 ] \
+TOT_N=$(num "${TOTAL:-0}")
+if [ "$NOTIFY" = 1 ] && [ "$PER_HOST" = 0 ] && [ "$TOT_N" -gt 0 ] \
    && command -v notify >/dev/null 2>&1; then
   DN=$(wc -l < "$OUT/hosts-done.txt" 2>/dev/null | tr -d ' ')
   EL=$(( ($(date +%s) - ${RUN_START:-$(date +%s)}) / 60 ))

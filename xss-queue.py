@@ -236,7 +236,12 @@ def _opener():
 
 
 def _headers():
-    h = {"User-Agent": "xss-scan/7"}
+    h = {"User-Agent": os.environ.get(
+        "XSS_UA",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0"),
+         "Accept": os.environ.get(
+             "XSS_ACCEPT",
+             "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")}
     for item in PROBE_HEADERS:
         if ":" in item:
             k, v = item.split(":", 1)
@@ -657,6 +662,32 @@ def _row_from_line(line):
     return (tid, url, param, sig, json.dumps(d, separators=(",", ":")))
 
 
+def _encoded_forms(marker):
+    """Same payload with HTML/JS escaping applied, i.e. harmless text."""
+    forms = set()
+    subs = [("&", "&amp;"), ("<", "&lt;"), (">", "&gt;"),
+            ('"', "&quot;"), ("'", "&#x27;"), ("'", "&#39;"), ("'", "&#039;")]
+    out = marker
+    for a, b in subs:
+        out = out.replace(a, b)
+    forms.add(out)
+    js = marker
+    for ch in ("<", ">", "'", '"', "&"):
+        js = js.replace(ch, "\\u%04x" % ord(ch))
+    forms.add(js)
+    return forms
+
+
+def _only_escaped(markers, body):
+    """True when every marker appears only in an encoded form."""
+    for m in markers:
+        if m in body:
+            return False
+        if not any(f in body for f in _encoded_forms(m)):
+            return False
+    return True
+
+
 def _ctx_survives(allowed, url, tid, markers):
     """Same verdict as ctxfilter: true when the payload can actually execute."""
     if tid in MANUAL_TEMPLATES or not markers:
@@ -664,6 +695,9 @@ def _ctx_survives(allowed, url, tid, markers):
     res = http_request(url, allowed, "GET")
     if res["error"] or not res["body"]:
         return True, "unreachable"
+    if "html" not in (res["ctype"] or "").lower():
+        # text/plain, application/json, XML ...: reflection is not execution
+        return False, "non_html"
     body = res["body"]
     stripped = re.sub(r"<script[^>]*type=[\"']application/(?:ld\+)?json[\"'][^>]*>.*?</script>",
                       "", body, flags=re.I | re.S)
@@ -674,6 +708,8 @@ def _ctx_survives(allowed, url, tid, markers):
         stripped = re.sub(pat, "", stripped, flags=re.I | re.S)
     if any(m in stripped for m in markers):
         return True, "html"
+    if _only_escaped(markers, stripped):
+        return False, "escaped"
     if any(m in body for m in markers):
         return False, "json"
     return True, "unknown"
@@ -790,7 +826,11 @@ def _host_key(u):
         u = "http://" + u
     try:
         sp = urlsplit(u)
-        return (sp.hostname or "").lower().rstrip(".")
+        host = (sp.hostname or "").lower().rstrip(".")
+        port = sp.port
+        if port and port not in (80, 443):
+            return "%s:%d" % (host, port)
+        return host
     except Exception:
         return ""
 
@@ -1098,6 +1138,145 @@ def _host_path(url):
         return url, "/"
 
 
+def cmd_escaped_report(db, out_file):
+    """Findings whose payload was reflected but entity/JS-escaped.
+
+    Not vulnerabilities: they show the sink exists and the app encodes it.
+    """
+    c = connect(db)
+    ensure(c)
+    rows = c.execute(
+        "SELECT DISTINCT url, COALESCE(param,''), template_id FROM findings"
+        " WHERE context='escaped' ORDER BY id").fetchall()
+    if not rows:
+        return 1
+    with open(out_file, "w", encoding="utf-8") as fh:
+        fh.write("REFLECTED BUT ESCAPED - not XSS, markup was encoded (%d)\n\n" % len(rows))
+        for url, param, tid in rows:
+            fh.write("ESCAPED %s\n" % url)
+            if param:
+                fh.write("    param=%s\n" % param)
+    print(len(rows))
+    return 0
+
+
+def cmd_new_candidates(db, out_file, marker_file="cand-notified.id", key_file=""):
+    """Reportable URL candidates (context=html) added since the last marker.
+
+    Used for notifications so filtered contexts (JSON blobs, escaped text,
+    non-HTML responses, 404s) never reach Discord.
+    """
+    c = connect(db)
+    ensure(c)
+    last = 0
+    try:
+        with open(marker_file, encoding="utf-8") as fh:
+            last = int(fh.read().strip() or 0)
+    except Exception:
+        last = 0
+    seen = set()
+    if key_file and os.path.exists(key_file):
+        try:
+            with open(key_file, encoding="utf-8") as fh:
+                seen = {l.strip() for l in fh if l.strip()}
+        except OSError:
+            pass
+    rows = c.execute(
+        "SELECT id,url,COALESCE(param,''),template_id FROM findings"
+        " WHERE context='html' AND id > ? ORDER BY id", (last,)).fetchall()
+    lines, keys = [], []
+    top = last
+    host_key_cache = {}
+    for fid, url, param, tid in rows:
+        top = fid
+        host, path = host_key_cache.get(url) or _host_path(url)
+        host_key_cache[url] = (host, path)
+        key = "cand|%s|%s|%s" % (host, path, param)
+        if key in seen or key in keys:
+            continue
+        keys.append(key)
+        lines.append("GET %s" % url)
+        if param:
+            lines.append("    param=%s" % param)
+    try:
+        with open(marker_file, "w", encoding="utf-8") as fh:
+            fh.write(str(top))
+    except OSError:
+        pass
+    if not keys:
+        return 1
+    with open(out_file, "w", encoding="utf-8") as fh:
+        fh.write("XSS CANDIDATES — not confirmed, verify manually (%d)\n\n" % len(keys))
+        fh.write("\n".join(lines[:60]) + "\n")
+        if len(lines) > 60:
+            fh.write("... %d more\n" % (len(lines) - 60))
+    if key_file:
+        try:
+            with open(key_file + ".pending", "a", encoding="utf-8") as fh:
+                for k in keys:
+                    fh.write(k + "\n")
+        except OSError:
+            pass
+    print(len(keys))
+    return 0
+
+
+def cmd_api_reflect(db, out_file, limit="300"):
+    """Report payload echoes from API-style endpoints (JSON/text responses).
+
+    These are NOT XSS by themselves: the browser will not execute them. They are
+    recorded for manual review because a SPA may render the value client-side.
+    """
+    import urllib.parse as up
+    allowed = load_policy(SCOPE_FILE)
+    if not allowed:
+        print("[-] api-reflect: scope policy missing", file=sys.stderr)
+        return 2
+    try:
+        cap = int(limit)
+    except Exception:
+        cap = 300
+    c = connect(db)
+    ensure(c)
+    seen, lines, n = set(), [], 0
+    rows = c.execute("SELECT url FROM urls ORDER BY id").fetchall()
+    payload = "<script>alert(1)</script>"
+    for (url,) in rows:
+        if n >= cap:
+            break
+        if "/api/" not in url and "/rest/" not in url:
+            continue
+        sp = up.urlsplit(url)
+        pairs = up.parse_qsl(sp.query, keep_blank_values=True)
+        if not pairs:
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        target = up.urlunsplit((sp.scheme, sp.netloc, sp.path,
+                                up.urlencode([(pairs[0][0], payload)]), sp.fragment))
+        n += 1
+        res = http_request(target, allowed, "GET")
+        if res["error"] or not res["body"]:
+            continue
+        body = res["body"]
+        hit = payload in body or "alert(1)" in body
+        if not hit:
+            continue
+        ctype = (res["ctype"] or "").split(";")[0] or "?"
+        lines.append("REFLECT %s param=%s ctype=%s status=%s"
+                     % (sp.path, pairs[0][0], ctype, res["status"]))
+        lines.append("    %s" % target)
+    if lines:
+        with open(out_file, "w", encoding="utf-8") as fh:
+            fh.write("API REFLECTIONS — not XSS, manual DOM review (%d)\n\n"
+                     % (len(lines) // 2))
+            fh.write("\n".join(lines) + "\n")
+        print(len(lines) // 2)
+        return 0
+    return 1
+
+
 def cmd_confirmed_new(db, out_file, marker_file="confirmed-notified.id", key_file=""):
     """Confirmed attempts not yet notified, one line per endpoint+parameter.
 
@@ -1357,12 +1536,22 @@ def cmd_js_extract(js_dir, limit="0"):
             u = m.group(0)
             if len(u) > 500 or _JS_SKIP_RE.search(u):
                 continue
+            if "\\u0026" in u or "\\u003d" in u:
+                continue  # JSON-escaped query separators are not real literals
+            u = u.replace("&amp;", "&").replace("&#38;", "&")
             out.add(u)
         for m in _JS_PATH_RE.finditer(body):
             raw = m.group(1)
             if len(raw) > 500 or _JS_SKIP_RE.search(raw):
                 continue
-            out.add(urljoin(origin, raw))
+            if "\\u0026" in raw or raw.endswith("&amp"):
+                continue
+            raw = raw.replace("&amp;", "&").replace("&#38;", "&")
+            u = urljoin(origin, raw)
+            # drop artifact params produced by minified HTML fragment strings
+            if re.search(r"[?&](amp|lt|gt|quot|nbsp)(=|&|$)", u):
+                continue
+            out.add(u)
     rows = sorted(out)
     if cap > 0 and len(rows) > cap:
         rows = rows[:cap]
@@ -2454,7 +2643,8 @@ def cmd_export(db, out_file):
     with open(tmp, "w", encoding="utf-8") as fh:
         for (blob,) in c.execute(
                 "SELECT json FROM findings"
-                " WHERE COALESCE(context,'') NOT IN ('json_data','gone')"
+                " WHERE COALESCE(context,'') NOT IN"
+                " ('json_data','gone','non_html','escaped','blocked')"
                 " ORDER BY id"):
             fh.write(blob + "\n")
             n += 1
@@ -2485,7 +2675,10 @@ def cmd_ctxfilter(db, keep="0"):
         return 2
     c = connect(db)
     ensure(c)
-    rows = c.execute("SELECT id, url, template_id FROM findings WHERE context=''").fetchall()
+    rows = c.execute(
+        "SELECT id, url, template_id FROM findings"
+        " WHERE COALESCE(context,'') IN"
+        " ('','unknown','unreachable','blocked')").fetchall()
     html = json_only = unknown = dropped = 0
     for fid, url, tid in rows:
         if tid in MANUAL_TEMPLATES:
@@ -2507,6 +2700,15 @@ def cmd_ctxfilter(db, keep="0"):
             unknown += 1
             c.execute("UPDATE findings SET context='unreachable' WHERE id=?", (fid,))
             continue
+        if res["status"] in (429, 503):
+            # rate limited / unavailable: undecided, retry on a later pass
+            unknown += 1
+            c.execute("UPDATE findings SET context='blocked' WHERE id=?", (fid,))
+            continue
+        if "html" not in (res["ctype"] or "").lower():
+            dropped += 1
+            c.execute("UPDATE findings SET context='non_html' WHERE id=?", (fid,))
+            continue
         body = res["body"]
         stripped = re.sub(r"<script[^>]*type=[\"']application/(?:ld\+)?json[\"'][^>]*>.*?</script>",
                           "", body, flags=re.I | re.S)
@@ -2518,6 +2720,10 @@ def cmd_ctxfilter(db, keep="0"):
                     r"<style\b.*?</style>"):
             stripped = re.sub(pat, "", stripped, flags=re.I | re.S)
         hit_html = any(m in stripped for m in markers)
+        if not hit_html and _only_escaped(markers, stripped):
+            dropped += 1
+            c.execute("UPDATE findings SET context='escaped' WHERE id=?", (fid,))
+            continue
         hit_json = (not hit_html) and any(m in body for m in markers)
         if hit_html:
             html += 1
@@ -2663,7 +2869,7 @@ def _dispatch(argv):
         "url-count": cmd_url_count, "sitemap-parse": cmd_sitemap_parse,
         "harvest": cmd_harvest,
         "show-findings": cmd_show_findings, "show-confirmed": cmd_show_confirmed,
-        "confirmed-new": cmd_confirmed_new,
+        "confirmed-new": cmd_confirmed_new, "api-reflect": cmd_api_reflect,
         "live-watch": cmd_live_watch, "host-status": cmd_host_status,
         "merge-run": cmd_merge_run,
         "js-extract": cmd_js_extract,
