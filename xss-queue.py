@@ -1635,6 +1635,42 @@ def cmd_js_extract(js_dir, limit="0"):
             body = new_body
         return body
 
+    def callsite_pairs(body, origin):
+        """For each HTTP client call, pair its URL literal with its option keys.
+
+        Framework-agnostic: axios/fetch/$http/ky/got/request/api. Keys are the
+        object literal properties inside the call, so arbitrary names like
+        speciesId or petId are picked up even when minified nearby.
+        """
+        res = []
+        pat = re.compile(r"\b(fetch|axios(?:\.[A-Za-z]+)?|\$http(?:\.[A-Za-z]+)?|"
+                         r"ky(?:\.[A-Za-z]+)?|got(?:\.[A-Za-z]+)?|request|api)\s*\(", re.I)
+        for m in pat.finditer(body):
+            i, depth, n = m.end(), 1, len(body)
+            while i < n and depth > 0:
+                ch = body[i]
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                i += 1
+            span = body[m.start():i]
+            urls = re.findall(r"""["'`]((?:https?://|/)[^"'`]{2,300})["'`]""", span)
+            keys = set(k for k in re.findall(r"([A-Za-z_$][\w$]{1,30})\s*:", span)
+                       if k not in SKIP_KEYS and not k.startswith("_"))
+            keys |= set(re.findall(r"""\.set\(\s*["']([A-Za-z0-9_-]{1,30})["']""", span))
+            keys |= set(re.findall(r"""URLSearchParams\s*\(\s*\{([^}]{0,300})\}""", span)
+                        and k for k in re.findall(r"([A-Za-z_$][\w$]{1,30})\s*:",
+                                                  re.search(r"URLSearchParams\s*\(\s*\{([^}]{0,300})\}", span).group(1)
+                                                  if re.search(r"URLSearchParams\s*\(\s*\{([^}]{0,300})\}", span) else ""))
+            if not keys:
+                continue
+            for u in urls:
+                if "?" in u or not re.search(r"/(?:api|rest|v[0-9]+|graphql)(?:/|$)", u):
+                    continue
+                res.append((urljoin(origin, u), keys))
+        return res
+
     def nearby_keys(body, pos, span=200):
         keys = set()
         win = body[max(0, pos - span):pos + span]
@@ -1677,7 +1713,7 @@ def cmd_js_extract(js_dir, limit="0"):
         raw = body
         body = join_concat(flatten_templates(body))
 
-        found = []  # (url, keys)
+        found = list(callsite_pairs(body, origin))  # (url, keys)
         for m in _JS_URL_RE.finditer(body):
             u = m.group(0)
             if len(u) > 500 or _JS_SKIP_RE.search(u):
