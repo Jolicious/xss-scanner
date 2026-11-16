@@ -70,6 +70,38 @@ exec 3>&1
 ORIG_ARGS=("$@")
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ---- portable shims: macOS/BSD lacks several GNU tools this script uses ----
+if ! command -v timeout >/dev/null 2>&1; then
+  if command -v gtimeout >/dev/null 2>&1; then
+    timeout() { gtimeout "$@"; }
+  else
+    timeout() {
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --foreground|-k|--kill-after) shift; [ "${1:-}" = "" ] || shift;;
+          -*) shift;;
+          *[!0-9]*) break;;
+          *) shift;;
+        esac
+      done
+      "$@"
+    }
+  fi
+fi
+if ! command -v sha1sum >/dev/null 2>&1 && command -v shasum >/dev/null 2>&1; then
+  sha1sum() { shasum -a 1 - | awk '{print $1}'; }
+fi
+if ! command -v flock >/dev/null 2>&1; then
+  flock() { local f="$1"; shift; "$@"; }
+fi
+if ! stat -c%s / >/dev/null 2>&1 && stat -f%z / >/dev/null 2>&1; then
+  stat() { if [ "$1" = "-c%s" ]; then shift; stat_bsd -f%z "$@"; else stat_bsd "$@"; fi; }
+  stat_bsd() { command stat "$@"; }
+fi
+if ! command -v setsid >/dev/null 2>&1; then
+  setsid() { "$@"; }
+fi
 TPL_DIR="${TPL_DIR:-$SELF_DIR}"
 QHELPER="${QHELPER:-$SELF_DIR/xss-queue.py}"
 
