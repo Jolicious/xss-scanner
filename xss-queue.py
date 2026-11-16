@@ -1048,8 +1048,20 @@ def cmd_host_status(db, hosts_file, done_file, log_file="", urls_done_file=""):
             pending[h] = pending.get(h, 0) + 1
         else:
             done[h] = done.get(h, 0) + 1
+    # discovery that is partial/processing/failed means unvisited endpoints,
+    # so the host is not complete even when no URL/job is queued
+    blocked = set()
+    for key, status in c.execute("SELECT key,status FROM discovery"):
+        if status not in ("partial", "processing", "failed"):
+            continue
+        h = _host_key(key) if "://" in str(key) else ""
+        if h in scope:
+            blocked.add(h)
+        elif status in ("partial", "processing") and str(key) in ("pages", "all"):
+            blocked.update(scope)
     completed = sorted((h for h in scope if not pending.get(h)
-                        and done.get(h)), key=lambda h: order.get(h, 0))
+                        and h not in blocked and done.get(h)),
+                       key=lambda h: order.get(h, 0))
     running = [h for h in scope if pending.get(h)]
     untouched = [h for h in scope if not pending.get(h) and not done.get(h)]
     try:

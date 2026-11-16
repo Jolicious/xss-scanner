@@ -151,7 +151,7 @@ NUCLEI_TIMEOUT="${NUCLEI_TIMEOUT:-3600}"
 VERIFY_TIMEOUT="${VERIFY_TIMEOUT:-900}"
 DO_GAU=1; DO_CRAWL=1; DO_VERIFY=0; DO_FORMS=1; FORMS_POST=1; DO_JS=1
 VERIFY_EXPLICIT=0; RATE_SET=0; CONC_SET=0; DISK_SET=0; NOTIFY_EXPLICIT=0
-COMPACT=0; RESUME=1; CONTINUE=0; RETRY_FAILED=0; STRICT=1; REDISCOVER=0
+COMPACT=0; RESUME=1; CONTINUE=0; RECHECK=0; RETRY_FAILED=0; STRICT=1; REDISCOVER=0
 SILENT=0; PER_HOST=0; PER_HOST_CHUNK=1; PER_HOST_JOBS=3; DO_SITEMAP=1; API_REFLECT=0
 REVERIFY=0; FORCE_CONFIG="${FORCE_CONFIG:-0}"; AMEND_LIMITS=0; DO_REPORT=1
 NOTIFY=0; NOTIFY_SUMMARY=0; NOTIFY_LIVE=1; NOTIFY_SENT_ANY=0; NOTIFY_IDS=(); NOTIFY_CANDIDATES=1
@@ -217,6 +217,7 @@ while [ $# -gt 0 ]; do
     --verify-batch)   VERIFY_BATCH="${2:-}"; shift 2;;
     --no-resume)      RESUME=0; shift;;
     --continue)       RESUME=1; CONTINUE=1; shift;;
+    --recheck)        RESUME=1; RECHECK=1; shift;;
     --retry-failed)   RETRY_FAILED=1; shift;;
     --force-config)   FORCE_CONFIG=1; shift;;
     --amend-limits)   AMEND_LIMITS=1; shift;;
@@ -367,7 +368,8 @@ run_per_host() {
         fi
       done
     fi
-    if [ -f "$OUT/hosts-done.txt" ] && grep -qxF "$CF_HOST" "$OUT/hosts-done.txt"; then
+    if [ "$RECHECK" = 0 ] && [ -f "$OUT/hosts-done.txt" ] \
+       && grep -qxF "$CF_HOST" "$OUT/hosts-done.txt"; then
       say "skip (already complete): $CF_HOST"
       rm -f "$cf"
       return 0
