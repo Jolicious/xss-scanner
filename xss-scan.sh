@@ -373,12 +373,22 @@ run_per_host() {
   }
   ph_status & PH_SPID=$!
 
+  WPIDS=()
   for cf in "$hostf"/h.*; do
     [ -s "$cf" ] || { rm -f "$cf"; continue; }
-    while [ "$(jobs -rp | wc -l)" -ge "$PH_JOBS" ]; do sleep 1; done
+    # throttle on worker pids only: the status loop is not a worker
+    while :; do
+      RUNNING=0
+      for _p in ${WPIDS[@]+"${WPIDS[@]}"}; do
+        kill -0 "$_p" 2>/dev/null && RUNNING=$((RUNNING + 1))
+      done
+      [ "$RUNNING" -lt "$PH_JOBS" ] && break
+      sleep 1
+    done
     ph_one "$cf" &
+    WPIDS+=("$!")
   done
-  wait
+  for _p in ${WPIDS[@]+"${WPIDS[@]}"}; do wait "$_p" 2>/dev/null; done
   kill "$PH_SPID" 2>/dev/null
   wait "$PH_SPID" 2>/dev/null
   printf '\n' 
@@ -627,8 +637,10 @@ fi
 for h in ${HDRS[@]+"${HDRS[@]}"}; do [ -n "$h" ] && AUTH_HDRS+=("$h"); done
 
 # normalize: reject duplicate names with different values, then sort for hashing
-if [ "${#AUTH_HDRS[@]}" -gt 0 ]; then
-  HDRNORM=$(python3 - "${AUTH_HDRS[@]}" <<'PY'
+AUTH_HDRS_N=0
+[ "${AUTH_HDRS[*]+x}" ] && AUTH_HDRS_N=${#AUTH_HDRS[@]}
+if [ "$AUTH_HDRS_N" -gt 0 ]; then
+  HDRNORM=$(python3 - ${AUTH_HDRS[@]+"${AUTH_HDRS[@]}"} <<'PY'
 import sys
 seen = {}
 out = []
@@ -656,7 +668,7 @@ fi
 NHDR=()
 for h in ${AUTH_HDRS[@]+"${AUTH_HDRS[@]}"}; do NHDR+=(-H "$h"); done
 # canonical fingerprint: lowercase names, exact values, order-insensitive
-AUTH_SHA=$(python3 - "${AUTH_HDRS[@]}" <<'PY'
+AUTH_SHA=$(python3 - ${AUTH_HDRS[@]+"${AUTH_HDRS[@]}"} <<'PY'
 import hashlib, sys
 lines = []
 for raw in sys.argv[1:]:
@@ -667,7 +679,7 @@ for raw in sys.argv[1:]:
 print(hashlib.sha256("\n".join(sorted(lines)).encode()).hexdigest())
 PY
 )
-echo "[*] auth: cookie=$([ -n "$COOKIE" ] && echo yes || echo no) token=$([ -n "$TOKEN" ] && echo yes || echo no) headers=${#AUTH_HDRS[@]} auth_sha=${AUTH_SHA:0:12}"
+echo "[*] auth: cookie=$([ -n "$COOKIE" ] && echo yes || echo no) token=$([ -n "$TOKEN" ] && echo yes || echo no) headers=${AUTH_HDRS_N:-0} auth_sha=${AUTH_SHA:0:12}"
 
 # ---- 1. normalize input ----
 : > "$OUT/hosts.txt"; : > "$OUT/seed-urls.txt"
@@ -741,7 +753,7 @@ TMPL_SHA=$(find "$TPL_DIR" -maxdepth 1 -name '*.yaml' -print0 2>/dev/null | sort
 COOKIE_SHA=$(printf '%s' "$COOKIE" | sha256sum | cut -d' ' -f1)
 HDR_SHA=$(printf '%s\n' ${HDRS[@]+"${HDRS[@]}"} | sha256sum | cut -d' ' -f1)
 # canonical authentication fingerprint (names lowercased, values exact, sorted)
-AUTH_SHA=$(python3 - "${AUTH_HDRS[@]}" <<'PY'
+AUTH_SHA=$(python3 - ${AUTH_HDRS[@]+"${AUTH_HDRS[@]}"} <<'PY'
 import hashlib, sys
 lines = []
 for raw in sys.argv[1:]:
@@ -1199,7 +1211,8 @@ fi
 
 # ---- 6. plan work queues ----
 python3 "$QHELPER" path-plan "$Q" "$OUT/path-targets.txt" 2>/dev/null
-PROBE_HDRS=("${AUTH_HDRS[@]}")
+PROBE_HDRS=()
+[ "${AUTH_HDRS[*]+x}" ] && PROBE_HDRS=("${AUTH_HDRS[@]}")
 export PROBE_HEADERS=$(python3 -c 'import json,sys
 print(json.dumps([a for a in sys.argv[1:] if ":" in a]))' ${PROBE_HDRS[@]+"${PROBE_HDRS[@]}"})
 if [ "${XSS_DEBUG_HEADERS:-0}" = "1" ]; then
