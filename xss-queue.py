@@ -1502,14 +1502,50 @@ _JS_SKIP_RE = re.compile(r"""\.(?:png|jpe?g|gif|svg|ico|css|map|woff2?|ttf|eot|m
 
 
 def cmd_js_extract(js_dir, limit="0"):
-    """Mine endpoint candidates out of downloaded JS bundles.
+    """Mine endpoints and their parameter names out of downloaded JS bundles.
 
-    Each file starts with a '#SRC <url>' line so relative paths can be resolved
-    against the script's own origin. Results are printed as absolute URLs for
-    `ingest` to scope-check like any other discovery source.
+    Framework-agnostic: works on any bundle. Handles plain literals, concatenated
+    literals ("/api/"+"x"), template literals with ${}, bare vN fragments, and
+    parameter names from `params:{...}`, `URLSearchParams({...})`,
+    `searchParams.set("k",...)`. Bare API paths get the discovered keys appended
+    so the scanner tests those parameter names too.
     """
     from urllib.parse import urljoin, urlsplit
     import glob as _glob
+
+    SKIP_KEYS = {"data", "headers", "method", "url", "body", "type", "mode",
+                 "cache", "credentials", "signal", "timeout", "responseType",
+                 "withCredentials", "onUploadProgress", "paramsSerializer",
+                 "contentType", "accept", "auth", "xsrfCookieName"}
+
+    def flatten_templates(body):
+        # `a/${x}/b` -> "a/1/b"
+        return re.sub(r"`([^`]{0,600})`", lambda m: '"' + re.sub(
+            r"\$\{[^}]{0,120}\}", "1", m.group(1)) + '"', body)
+
+    def join_concat(body):
+        pat = re.compile(r'"([^"\\]{0,200})"\s*\+\s*"([^"\\]{0,200})"')
+        for _ in range(6):
+            new_body, n = pat.subn(lambda m: '"' + m.group(1) + m.group(2) + '"', body)
+            if not n or new_body == body:
+                break
+            body = new_body
+        return body
+
+    def nearby_keys(body, pos, span=200):
+        keys = set()
+        win = body[max(0, pos - span):pos + span]
+        for m in re.finditer(r"params\s*:\s*\{([^{}]{0,300})\}", win):
+            for k in re.finditer(r"([A-Za-z_][A-Za-z0-9_]{1,30})\s*:", m.group(1)):
+                keys.add(k.group(1))
+        for m in re.finditer(r"URLSearchParams\s*\(\s*\{([^{}]{0,300})\}", win):
+            for k in re.finditer(r"([A-Za-z_][A-Za-z0-9_]{1,30})\s*:", m.group(1)):
+                keys.add(k.group(1))
+        for m in re.finditer(r"searchParams\.set\s*\(\s*[\"']([A-Za-z0-9_]{1,30})[\"']", win):
+            keys.add(m.group(1))
+        for m in re.finditer(r"[?&]([A-Za-z_][A-Za-z0-9_]{1,30})=", win):
+            keys.add(m.group(1))
+        return {k for k in keys if k not in SKIP_KEYS and not k.startswith("_")}
 
     cap = 0
     try:
@@ -1535,31 +1571,48 @@ def cmd_js_extract(js_dir, limit="0"):
         if parts.scheme not in ("http", "https") or not parts.netloc:
             continue
         origin = parts.scheme + "://" + parts.netloc
+        raw = body
+        body = join_concat(flatten_templates(body))
+
+        found = []  # (url, keys)
         for m in _JS_URL_RE.finditer(body):
             u = m.group(0)
             if len(u) > 500 or _JS_SKIP_RE.search(u):
                 continue
             if "\\u0026" in u or "\\u003d" in u:
-                continue  # JSON-escaped query separators are not real literals
+                continue
             u = u.replace("&amp;", "&").replace("&#38;", "&")
-            out.add(u)
-        # bare fragments: "petprofile/v1/pets", "users/v2/search"
+            found.append((u, nearby_keys(body, m.start())))
         for m in re.finditer(r"""["'`]([A-Za-z0-9_.-]+/v[0-9]+/[A-Za-z0-9_./%?=&-]{1,140})["'`]""", body):
             frag = m.group(1)
             for prefix in ("/api/", "/"):
-                out.add(urljoin(origin, prefix + frag))
+                found.append((urljoin(origin, prefix + frag), nearby_keys(body, m.start())))
         for m in _JS_PATH_RE.finditer(body):
-            raw = m.group(1)
-            if len(raw) > 500 or _JS_SKIP_RE.search(raw):
+            rawp = m.group(1)
+            if len(rawp) > 500 or _JS_SKIP_RE.search(rawp):
                 continue
-            if "\\u0026" in raw or raw.endswith("&amp"):
+            if "\\u0026" in rawp or rawp.endswith("&amp"):
                 continue
-            raw = raw.replace("&amp;", "&").replace("&#38;", "&")
-            u = urljoin(origin, raw)
-            # drop artifact params produced by minified HTML fragment strings
+            rawp = rawp.replace("&amp;", "&").replace("&#38;", "&")
+            u = urljoin(origin, rawp)
             if re.search(r"[?&](amp|lt|gt|quot|nbsp)(=|&|$)", u):
                 continue
+            found.append((u, nearby_keys(body, m.start())))
+
+        for u, keys in found:
             out.add(u)
+            if "?" in u or not keys:
+                continue
+            sp = urlsplit(u)
+            if "/api/" not in sp.path and not re.search(r"/v[0-9]+/", sp.path):
+                continue
+            usable = [k for k in sorted(keys)[:6]
+                      if re.match(r"^[A-Za-z][A-Za-z0-9_]{0,29}$", k)]
+            if not usable:
+                continue
+            qs = "&".join("%s=1" % k for k in usable)
+            out.add(u + "?" + qs)
+
     rows = sorted(out)
     if cap > 0 and len(rows) > cap:
         rows = rows[:cap]
