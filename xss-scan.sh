@@ -382,12 +382,12 @@ run_per_host() {
     PTMO="${PER_HOST_TIMEOUT:-0}"
     if [ "$PTMO" -gt 0 ]; then
       timeout --foreground "$PTMO" \
-        env PER_HOST_CHILD=1 FORCE_CONFIG="$CFORCE" bash "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} -i "$cf" -o "$part" \
+        env PER_HOST_CHILD=1 FORCE_CONFIG="$CFORCE" PRESEED_ALIVE=1 bash "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} -i "$cf" -o "$part" \
         >&3 2>>"$OUT/logs/per-host.log"
       prc=$?
       [ "$prc" -eq 124 ] && warn "per-host: $(tr '\n' ' ' < "$cf") hit ${PTMO}s budget; partial results kept"
     else
-      env PER_HOST_CHILD=1 FORCE_CONFIG="$CFORCE" bash "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} -i "$cf" -o "$part" \
+      env PER_HOST_CHILD=1 FORCE_CONFIG="$CFORCE" PRESEED_ALIVE=1 bash "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} -i "$cf" -o "$part" \
         >&3 2>>"$OUT/logs/per-host.log"
       prc=$?
     fi
@@ -934,6 +934,17 @@ python3 "$QHELPER" meta-set "$Q" config_id "$CONFIG_ID" 2>/dev/null || true
 [ "$RETRY_FAILED" = 1 ] && python3 "$QHELPER" retry "$Q"
 
 # ---- 4. alive probe ----
+if [ "${PRESEED_ALIVE:-0}" = 1 ] && [ -s "$IN" ]; then
+  # parent already probed httpx over the whole list; reuse those URLs
+  grep -Ei '^https?://[^ ]+$' "$IN" | sort -u > "$OUT/alive.txt" 2>/dev/null || true
+  ALIVE=$(wc -l < "$OUT/alive.txt" | tr -d ' ')
+  if [ "${ALIVE:-0}" -gt 0 ]; then
+    echo "[*] alive: $ALIVE (pre-seeded by parent, httpx skipped)"
+    python3 "$QHELPER" discovery-set "$Q" httpx all done 0
+    DISC=done
+  fi
+fi
+
 DISC=$(python3 "$QHELPER" discovery-status "$Q" httpx all 2>/dev/null)
 if [ "$REDISCOVER" = 1 ] || [ "$DISC" != "done" ]; then
   echo "[*] alive probe (httpx)"
