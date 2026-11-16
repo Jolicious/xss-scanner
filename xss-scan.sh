@@ -1273,6 +1273,19 @@ EOS
       trim_log "$LOGS/js.log" 2097152
       [ "$JRC" -eq 0 ] || { warn "js-extract rc=$JRC"; break; }
     done
+    # inline <script> blocks on HTML pages (SPA bootstrap/config literals)
+    rm -rf "$OUT/.js-inline"
+    IN_N=$(python3 "$QHELPER" inline-scripts "$Q" "$OUT/.js-inline" \
+             "${INLINE_PAGES:-120}" 2>>"$LOGS/js.log" || echo 0)
+    case "${IN_N:-0}" in ''|*[!0-9]*) IN_N=0;; esac
+    if [ "$IN_N" -gt 0 ]; then
+      echo "[*] inline scripts: $IN_N page(s) mined"
+      python3 "$QHELPER" js-extract "$OUT/.js-inline" "$MAX_JS_URLS" > "$URLTMP" 2>>"$LOGS/js.log"
+      if [ -s "$URLTMP" ]; then ingest < "$URLTMP" 2>>"$LOGS/js.log" || true; fi
+      : > "$URLTMP"
+    fi
+    rm -rf "$OUT/.js-inline"
+
     python3 "$QHELPER" discovery-set "$Q" js pages done 0
     python3 "$QHELPER" meta-set "$Q" js_rev 3 2>/dev/null || true
     rm -rf "$OUT/.js-dl" "$OUT/.js-fetch.sh" "$OUT/.js-all.txt" "$OUT/.js-urls.txt"

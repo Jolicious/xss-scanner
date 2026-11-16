@@ -1533,6 +1533,63 @@ _JS_PATH_RE = re.compile(r"""["'`](/[A-Za-z0-9._~!$&()*+,;=:@%\-/]{2,}(?:\?[^"'`
 _JS_SKIP_RE = re.compile(r"""\.(?:png|jpe?g|gif|svg|ico|css|map|woff2?|ttf|eot|mp4|webp|avif|pdf|zip|gz)(?:[?#]|$)""", re.I)
 
 
+def cmd_inline_scripts(db, out_dir, limit="200"):
+    """Fetch discovered HTML pages and save their inline <script> blocks.
+
+    SPAs often keep API literals and route maps inline (Next.js bootstrap,
+    window.__CONFIG__). Those never appear in .js files, so bundle mining alone
+    misses them. Output files use the same "#SRC <page>" header as bundles so
+    `js-extract` can process them unchanged.
+    """
+    import glob as _glob
+    allowed = load_policy(SCOPE_FILE)
+    if not allowed:
+        print("[-] inline-scripts: scope policy missing", file=sys.stderr)
+        return 2
+    try:
+        cap = int(limit)
+    except Exception:
+        cap = 200
+    c = connect(db)
+    ensure(c)
+    pages = []
+    seen = set()
+    for (u,) in c.execute("SELECT url FROM urls ORDER BY id"):
+        if "/api/" in u or "/rest/" in u:
+            continue
+        base = u.split("?", 1)[0]
+        if base not in seen:
+            seen.add(base)
+            pages.append(base)
+    for (t,) in c.execute("SELECT target FROM jobs WHERE kind='path' ORDER BY id"):
+        if "/api/" in t or "/rest/" in t:
+            continue
+        base = t.split("?", 1)[0]
+        if base not in seen:
+            seen.add(base)
+            pages.append(base)
+    pages = pages[:cap]
+    os.makedirs(out_dir, exist_ok=True)
+    got = files = 0
+    script_re = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", re.I | re.S)
+    for page in pages:
+        res = http_request(page, allowed, "GET")
+        if res["error"] or "html" not in (res["ctype"] or "").lower():
+            continue
+        blocks = [b for b in script_re.findall(res["body"]) if len(b.strip()) > 40]
+        if not blocks:
+            continue
+        path = os.path.join(out_dir, "inline-%06d.txt" % files)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("#SRC %s\n" % page)
+            fh.write("\n;\n".join(blocks))
+        files += 1
+        got += len(blocks)
+    print("[*] inline-scripts: %d page(s), %d block(s) saved" % (files, got), file=sys.stderr)
+    print(files)
+    return 0
+
+
 def cmd_js_extract(js_dir, limit="0"):
     """Mine endpoints and their parameter names out of downloaded JS bundles.
 
@@ -2991,7 +3048,7 @@ def _dispatch(argv):
         "confirmed-new": cmd_confirmed_new, "api-reflect": cmd_api_reflect,
         "live-watch": cmd_live_watch, "host-status": cmd_host_status,
         "merge-run": cmd_merge_run,
-        "js-extract": cmd_js_extract,
+        "js-extract": cmd_js_extract, "inline-scripts": cmd_inline_scripts,
         "path-abort": cmd_path_abort, "body-batch": cmd_body_batch,
         "body-abort": cmd_body_abort, "export": cmd_export, "stats": cmd_stats,
         "coverage": cmd_coverage, "ctxfilter": cmd_ctxfilter, "verify-plan": cmd_verify_plan,
