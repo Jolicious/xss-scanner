@@ -397,7 +397,13 @@ run_per_host() {
       # merges append to shared files: serialise them
       if flock "$OUT/.merge.lock" python3 "$QHELPER" merge-run "$part" "$OUT" \
            >/dev/null 2>>"$OUT/logs/merge.log"; then
-        rm -rf "$part"
+        _comp=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("complete"))' \
+                  "$part/coverage.json" 2>/dev/null || echo False)
+        if [ "$_comp" = "True" ]; then
+          rm -rf "$part"
+        else
+          say "kept unfinished state for $CF_HOST (resume with --continue)"
+        fi
       else
         mkdir -p "$OUT/.failed-parts"
         mv -f "$part" "$OUT/.failed-parts/$(basename "$cf")" 2>/dev/null || true
@@ -1605,6 +1611,17 @@ if [ "$ESC_N" -gt 0 ]; then
   if [ "$NOTIFY" = 1 ] && command -v notify >/dev/null 2>&1; then
     notify_file "$OUT/escaped.txt" "escaped reflections" \
       || warn "escaped notify failed (see logs/notify.log)"
+  fi
+fi
+
+# ---- 9d. blocked (rate limited) reflections ----
+BLK_N=$(python3 "$QHELPER" blocked-report "$Q" "$OUT/blocked.txt" 2>/dev/null || echo 0)
+case "${BLK_N:-0}" in ''|*[!0-9]*) BLK_N=0;; esac
+if [ "$BLK_N" -gt 0 ]; then
+  echo "[*] blocked reflections: $BLK_N (see $OUT/blocked.txt)"
+  if [ "$NOTIFY" = 1 ] && command -v notify >/dev/null 2>&1; then
+    notify_file "$OUT/blocked.txt" "blocked" \
+      || warn "blocked notify failed (see logs/notify.log)"
   fi
 fi
 

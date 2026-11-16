@@ -1154,6 +1154,25 @@ def _host_path(url):
         return url, "/"
 
 
+def cmd_blocked_report(db, out_file):
+    """Findings that could not be evaluated because the target rate-limited us."""
+    c = connect(db)
+    ensure(c)
+    rows = c.execute(
+        "SELECT DISTINCT url, COALESCE(param,'') FROM findings"
+        " WHERE context='blocked' ORDER BY id").fetchall()
+    if not rows:
+        return 1
+    with open(out_file, "w", encoding="utf-8") as fh:
+        fh.write("BLOCKED - rate limited, could not verify (%d)\n\n" % len(rows))
+        for url, param in rows:
+            fh.write("BLOCKED %s\n" % url)
+            if param:
+                fh.write("    param=%s\n" % param)
+    print(len(rows))
+    return 0
+
+
 def cmd_escaped_report(db, out_file):
     """Findings whose payload was reflected but entity/JS-escaped.
 
@@ -2793,6 +2812,9 @@ def cmd_ctxfilter(db, keep="0"):
             c.execute("UPDATE findings SET context='unknown' WHERE id=?", (fid,))
             continue
         res = http_request(url, allowed, "GET")
+        if res["status"] in (429, 503):
+            time.sleep(3)
+            res = http_request(url, allowed, "GET")
         if res["error"] or not res["body"]:
             unknown += 1
             c.execute("UPDATE findings SET context='unreachable' WHERE id=?", (fid,))
