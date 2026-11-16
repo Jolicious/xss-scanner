@@ -1307,6 +1307,10 @@ if [ "$DO_FORMS" = 1 ]; then
     | awk '
       {
         u=$0; path=u;
+        # JS route templates ("/:slug/dp/:id", "/api/*") are not real pages
+        sub(/[?#].*$/, "", path);
+        if (path ~ /[:*]/) next;
+        path=u;
         sub(/^[a-z]+:\/\/[^\/]+/, "", path);
         sub(/[?#].*$/, "", path);
         if (path == "") path="/";

@@ -1872,6 +1872,13 @@ def cmd_form_plan(db, pages_file, max_pages="200"):
             print("[*] form-plan: time budget %.0fs reached, %d page(s) queued for resume"
                   % (budget, len(deferred)), file=sys.stderr)
             break
+        # JS route templates are not fetchable pages: mark them done, skip
+        _sp = urlsplit(page)
+        if any(ch in (_sp.path or "") for ch in (":", "*")):
+            c.execute("INSERT INTO discovery(source,key,status,rc,ts)"
+                      " VALUES('forms',?,'done',0,?) ON CONFLICT(source,key) DO UPDATE SET"
+                      " status='done', rc=0, ts=excluded.ts", (page, now()))
+            continue
         c.execute("INSERT INTO discovery(source,key,status,rc,ts)"
                   " VALUES('forms',?,'processing',0,?) ON CONFLICT(source,key) DO UPDATE SET"
                   " status='processing', ts=excluded.ts", (page, now()))
