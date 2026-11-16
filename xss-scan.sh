@@ -317,6 +317,11 @@ run_per_host() {
       rm -f "$cf"
       return 0
     fi
+    # visible in silent mode: which host is being worked on right now
+    NEXT=$(flock "$OUT/.ph-idx.lock" bash -c 'n=$(cat "$1" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$1"; echo "$n"' _ "$OUT/.ph-idx")
+    case "${NEXT:-}" in ''|*[!0-9]*) NEXT="?";; esac
+    say "testing $NEXT/$total: $CF_HOST"
+
     PTMO="${PER_HOST_TIMEOUT:-0}"
     if [ "$PTMO" -gt 0 ]; then
       timeout --foreground "$PTMO" \
