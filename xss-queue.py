@@ -60,6 +60,7 @@ BODY_PAYLOADS = _ALL_PAYLOADS if os.environ.get("XSS_FULL_PAYLOADS") == "1" else
 RAW_MARKERS = ("<svg onload=", "<svg/onload=", "<img src=x onerror=",
                "</script><svg/onload=", "<script>alert(", "</script><script>",
                '<link rel="x" href="')
+API_PARAMS = ("limit", "page", "id", "q", "query", "sort", "offset", "size", "filter")
 MANUAL_TEMPLATES = ("reflected-body-xss",)
 COMMON_PARAMS = ["p", "q", "id", "page", "site", "url", "file", "name",
                  "search", "query", "level", "product", "version"]
@@ -1642,6 +1643,12 @@ def cmd_path_plan(db, target_file):
                 added += 1
                 if state == "deferred":
                     dropped += 1
+            # API-ish paths with no query: probe common parameter names so a
+            # reflection on ?limit= / ?id= is reachable without JS hints
+            if "?" not in t and re.search(r"/(?:api|rest|v[0-9]+|graphql)(?:/|$)", t):
+                for key in API_PARAMS:
+                    qu = t + "?%s=1" % key
+                    c.execute("INSERT OR IGNORE INTO urls(url) VALUES(?)", (qu,))
         c.execute("COMMIT")
     print("[*] path jobs queued: %d, dropped by cap: %d" % (added, dropped), file=sys.stderr)
 
