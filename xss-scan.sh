@@ -153,7 +153,7 @@ DO_GAU=1; DO_CRAWL=1; DO_VERIFY=0; DO_FORMS=1; FORMS_POST=1; DO_JS=1
 VERIFY_EXPLICIT=0; RATE_SET=0; CONC_SET=0; DISK_SET=0; NOTIFY_EXPLICIT=0
 COMPACT=0; RESUME=1; CONTINUE=0; RETRY_FAILED=0; STRICT=1; REDISCOVER=0
 SILENT=0; PER_HOST=0; PER_HOST_CHUNK=1; PER_HOST_JOBS=3; DO_SITEMAP=1; API_REFLECT=0
-REVERIFY=0; FORCE_CONFIG=0; AMEND_LIMITS=0; DO_REPORT=1
+REVERIFY=0; FORCE_CONFIG="${FORCE_CONFIG:-0}"; AMEND_LIMITS=0; DO_REPORT=1
 NOTIFY=0; NOTIFY_SUMMARY=0; NOTIFY_LIVE=1; NOTIFY_SENT_ANY=0; NOTIFY_IDS=(); NOTIFY_CANDIDATES=1
 NOTIFY_CONFIG="${NOTIFY_CONFIG:-$HOME/.config/notify/provider-config.yaml}"
 JSON_FILE=""
@@ -345,6 +345,7 @@ run_per_host() {
   [ "$ALIVE_BATCH" -gt 0 ] || die "no alive hosts in $IN (see logs/per-host.log)"
   total="$ALIVE_BATCH"
   split -l "$chunk" -d -a 5 "$OUT/.alive-batch.txt" "$hostf/h."
+  rm -f "$OUT/.ph-idx" 2>/dev/null || true
   PH_JOBS="${PER_HOST_JOBS:-3}"
   case "$PH_JOBS" in ''|*[!0-9]*) PH_JOBS=3;; esac
   [ "$PH_JOBS" -ge 1 ] || PH_JOBS=1
@@ -356,6 +357,16 @@ run_per_host() {
     [ -s "$cf" ] || { rm -f "$cf"; return 0; }
     part="$parts/$(basename "$cf")"
     CF_HOST=$(head -1 "$cf" | sed -E 's#^[a-z][a-z0-9+.-]*://##; s#[/?#].*$##')
+    if [ "$CONTINUE" = 1 ] && [ ! -d "$part" ]; then
+      for _old in "$parts"/*/; do
+        [ -d "$_old" ] || continue
+        [ "$_old" = "$part/" ] && continue
+        if [ -f "$_old/hosts.txt" ] && grep -qxF "$CF_HOST" "$_old/hosts.txt"; then
+          mv -f "$_old" "$part" 2>/dev/null && say "--continue: resumed existing state for $CF_HOST"
+          break
+        fi
+      done
+    fi
     if [ -f "$OUT/hosts-done.txt" ] && grep -qxF "$CF_HOST" "$OUT/hosts-done.txt"; then
       say "skip (already complete): $CF_HOST"
       rm -f "$cf"
@@ -366,15 +377,17 @@ run_per_host() {
     case "${NEXT:-}" in ''|*[!0-9]*) NEXT="?";; esac
     say "testing $NEXT/$total: $CF_HOST"
 
+    CFORCE=0
+    [ "$CONTINUE" = 1 ] && CFORCE=1
     PTMO="${PER_HOST_TIMEOUT:-0}"
     if [ "$PTMO" -gt 0 ]; then
       timeout --foreground "$PTMO" \
-        env PER_HOST_CHILD=1 bash "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} -i "$cf" -o "$part" \
+        env PER_HOST_CHILD=1 FORCE_CONFIG="$CFORCE" bash "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} -i "$cf" -o "$part" \
         >&3 2>>"$OUT/logs/per-host.log"
       prc=$?
       [ "$prc" -eq 124 ] && warn "per-host: $(tr '\n' ' ' < "$cf") hit ${PTMO}s budget; partial results kept"
     else
-      env PER_HOST_CHILD=1 bash "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} -i "$cf" -o "$part" \
+      env PER_HOST_CHILD=1 FORCE_CONFIG="$CFORCE" bash "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} -i "$cf" -o "$part" \
         >&3 2>>"$OUT/logs/per-host.log"
       prc=$?
     fi
