@@ -152,7 +152,7 @@ VERIFY_TIMEOUT="${VERIFY_TIMEOUT:-900}"
 DO_GAU=1; DO_CRAWL=1; DO_VERIFY=0; DO_FORMS=1; FORMS_POST=1; DO_JS=1
 VERIFY_EXPLICIT=0; RATE_SET=0; CONC_SET=0; DISK_SET=0; NOTIFY_EXPLICIT=0
 COMPACT=0; RESUME=1; CONTINUE=0; RECHECK=0; RETRY_FAILED=0; STRICT=1; REDISCOVER=0
-SILENT=0; PER_HOST=0; PER_HOST_CHUNK=1; PER_HOST_JOBS=3; DO_SITEMAP=1; API_REFLECT=0
+SILENT=0; PER_HOST=0; PER_HOST_CHUNK=1; PER_HOST_JOBS=3; DO_REQUEUE_THROTTLED=1; DO_SITEMAP=1; API_REFLECT=0
 REVERIFY=0; FORCE_CONFIG="${FORCE_CONFIG:-0}"; AMEND_LIMITS=0; DO_REPORT=1
 NOTIFY=0; NOTIFY_SUMMARY=0; NOTIFY_LIVE=1; NOTIFY_SENT_ANY=0; NOTIFY_IDS=(); NOTIFY_CANDIDATES=1
 NOTIFY_CONFIG="${NOTIFY_CONFIG:-$HOME/.config/notify/provider-config.yaml}"
@@ -192,6 +192,7 @@ while [ $# -gt 0 ]; do
     --no-js)          DO_JS=0; shift;;
     --no-sitemap)     DO_SITEMAP=0; shift;;
     --api-reflections) API_REFLECT=1; shift;;
+    --no-requeue-throttled) DO_REQUEUE_THROTTLED=0; shift;;
     -q|--silent|--quiet) SILENT=1; shift;;
     --per-host)       PER_HOST=1; shift;;
     --per-host-chunk) PER_HOST=1; PER_HOST_CHUNK="${2:-1}"; shift 2;;
@@ -1486,6 +1487,22 @@ while :; do
         fi
         rm -f "$OUT/.cand-notified.keys.pending" "$OUT/.notify-live.txt"
         rm -f "$OUT/.notify-live.txt"
+      fi
+      # hosts that started throttling during this batch get their URLs requeued
+      if [ "$DO_REQUEUE_THROTTLED" = 1 ]; then
+        TH_HOSTS=$(sed -E 's#^https?://##; s#[/:?#].*$##' "$OUT/.batch.$$.txt" \
+                   | sort -u | head -40)
+        for th in $TH_HOSTS; do
+          [ -n "$th" ] || continue
+          TH_CODE=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 \
+                      ${NHDR[@]+"${NHDR[@]}"} "https://$th/" 2>/dev/null)
+          case "$TH_CODE" in
+            429|503)
+              RQ=$(python3 "$QHELPER" requeue-host "$Q" "$th" 2>/dev/null || echo 0)
+              [ "${RQ:-0}" -gt 0 ] && warn "throttled host $th (HTTP $TH_CODE): requeued ${RQ} url(s)"
+              ;;
+          esac
+        done
       fi
       rm -f "$OUT/.batch.$$.txt" "$BJ"
       trim_log "$LOGS/nuclei-batch-$BATCH_IDX.log" 4194304

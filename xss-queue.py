@@ -2559,6 +2559,28 @@ def _inject_path(candidate, payload, idx=None):
     return urlunsplit((sp.scheme, sp.netloc, "/".join(segs), sp.query, sp.fragment))
 
 
+def cmd_requeue_host(db, host, max_tries="2"):
+    """Requeue a host's done URLs after it answered 429/503 during a batch.
+
+    Bounded by tries so a permanently blocking host cannot loop forever.
+    """
+    c = connect(db)
+    ensure(c)
+    try:
+        mt = int(max_tries)
+    except Exception:
+        mt = 2
+    like = "%%//%s/%%" % host.replace("%", "")
+    n = c.execute("SELECT COUNT(*) FROM urls WHERE state='done' AND url LIKE ?"
+                  " AND tries < ?", (like, mt)).fetchone()[0]
+    c.execute("BEGIN IMMEDIATE")
+    c.execute("UPDATE urls SET state='pending', tries=tries+1"
+              " WHERE state='done' AND url LIKE ? AND tries < ?", (like, mt))
+    c.execute("COMMIT")
+    print(n)
+    return 0
+
+
 def cmd_promote_urls(db):
     c = connect(db)
     ensure(c)
@@ -3107,7 +3129,7 @@ def _dispatch(argv):
         "verify-report": cmd_verify_report,
         "verify-reset": cmd_verify_reset, "discovery-set": cmd_discovery_set,
         "discovery-status": cmd_discovery_status, "discovery-done": cmd_discovery_done,
-        "discovery-pending": cmd_discovery_pending, "meta-set": cmd_meta_set, "meta-get": cmd_meta_get, "promote-jobs": cmd_promote_jobs, "promote-urls": cmd_promote_urls,
+        "discovery-pending": cmd_discovery_pending, "meta-set": cmd_meta_set, "meta-get": cmd_meta_get, "promote-jobs": cmd_promote_jobs, "promote-urls": cmd_promote_urls, "requeue-host": cmd_requeue_host,
         "export-confirmed": cmd_export_confirmed,
     }
     rc_cmds = {
