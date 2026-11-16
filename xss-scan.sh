@@ -132,6 +132,10 @@ die() { echo "[-] $*" >&2; [ "${SILENT:-0}" = 1 ] && echo "[-] $*" >&3; exit 1; 
 warn() { echo "[!] $*" >&2; }
 # findings go to the terminal even when chatter is redirected
 emit() { if [ "$SILENT" = 1 ]; then cat >&3; else cat; fi; }
+stage() { [ "${PER_HOST_CHILD:-0}" = 1 ] || return 0
+          local h; h=$(head -1 "$OUT/hosts.txt" 2>/dev/null | sed -E 's#^[a-z][a-z0-9+.-]*://##; s#[/?#].*$##')
+          printf '%s|%s' "${h:-host}" "${1:-working}" > "$OUT/.stage" 2>/dev/null || true
+          return 0; }
 say()  { [ "${PER_HOST_CHILD:-0}" = 1 ] && return 0
          if [ "$SILENT" = 1 ]; then echo "[*] $*" >&3; else echo "[*] $*"; fi; }
 usage() { awk 'NR>1 && /^set -uo/{exit} NR>1 {sub(/^# ?/,""); print}' "${BASH_SOURCE[0]}"; }
@@ -349,12 +353,35 @@ run_per_host() {
     rm -f "$cf"
   }
 
+  ph_status() {
+    local line p st last=""
+    while :; do
+      line=""
+      for p in "$parts"/*/; do
+        [ -d "$p" ] || continue
+        st=$(cat "$p/.stage" 2>/dev/null)
+        [ -n "$st" ] || continue
+        line="$line${st} | "
+      done
+      line="${line% | }"
+      if [ -n "$line" ] && [ "$line" != "$last" ]; then
+        printf '\r[*] %s\033[K' "$line" >&3
+        last="$line"
+      fi
+      sleep 1
+    done
+  }
+  ph_status & PH_SPID=$!
+
   for cf in "$hostf"/h.*; do
     [ -s "$cf" ] || { rm -f "$cf"; continue; }
     while [ "$(jobs -rp | wc -l)" -ge "$PH_JOBS" ]; do sleep 1; done
     ph_one "$cf" &
   done
   wait
+  kill "$PH_SPID" 2>/dev/null
+  wait "$PH_SPID" 2>/dev/null
+  printf '\n' 
 
   rm -rf "$hostf" "$parts"
   echo "[*] per-host done: $(wc -l < "$OUT/hosts-done.txt" | tr -d ' ')/$total host(s) complete" >&3
@@ -843,6 +870,7 @@ python3 "$QHELPER" meta-set "$Q" config_id "$CONFIG_ID" 2>/dev/null || true
 DISC=$(python3 "$QHELPER" discovery-status "$Q" httpx all 2>/dev/null)
 if [ "$REDISCOVER" = 1 ] || [ "$DISC" != "done" ]; then
   echo "[*] alive probe (httpx)"
+  stage "httpx"
   timeout --foreground "$STEP_TIMEOUT" "$HTTPX_BIN" -l "$OUT/hosts.txt" -silent -threads "$THREADS" \
     ${NHDR[@]+"${NHDR[@]}"} -o "$OUT/alive.txt" 2>>"$LOGS/httpx.log"
   RC=$?
@@ -897,6 +925,7 @@ if [ "$DO_GAU" = 1 ]; then
   GAU_TODO=$(wc -l < "$OUT/.gau-todo.txt" | tr -d ' ')
   if [ "$GAU_TODO" -gt 0 ]; then
     echo "[*] gau: $GAU_TODO host(s), conc=$GAU_CONC timeout=${GAU_TIMEOUT}s"
+  stage "gau"
     cat > "$OUT/.gau-worker.sh" <<'EOS'
 #!/bin/bash
 gh="$1"; workdir="$2"; log="$3"; thr="$4"; tmo="$5"
@@ -972,6 +1001,7 @@ if [ "$DO_SITEMAP" = 1 ] && [ "$HAVE_CURL" = 1 ]; then
     rm -f "$SM_TMP"
     python3 "$QHELPER" discovery-set "$Q" sitemap pages done 0
     echo "[*] sitemap/robots: $SM_CNT url(s) harvested"
+  stage "sitemap"
   fi
 fi
 
@@ -1015,6 +1045,7 @@ if [ "$DO_CRAWL" = 1 ] && { [ "$REDISCOVER" = 1 ] || [ "$DISC" != "done" ]; }; t
         [ "$K_CT" -gt "$K_CAP" ] && K_CT="$K_CAP"
       fi
       echo "[*] crawl pass $K_PASS at $(date +%H:%M:%S): $KC host(s) ($(basename "$kf"))"
+  stage "crawl"
       timeout --foreground "$K_TIMEOUT" katana -list "$kf" -d "$K_DEPTH" -jc -fs fqdn \
         -ct "${K_CT}s" -kf robotstxt -kf sitemapxml -fsu -rl "$RATE" -c "$CONC" -timeout 10 -silent \
         ${NHDR[@]+"${NHDR[@]}"} > "$URLTMP" 2>>"$LOGS/katana.log"
@@ -1138,6 +1169,7 @@ EOS
       case "${NEWN:-0}" in ''|*[!0-9]*) NEWN=0;; esac
       [ "$NEWN" -gt 0 ] || break
       echo "[*] js mining round $JROUND: $NEWN new bundle(s), conc=$JS_CONC"
+  stage "js"
       xargs -P "$JS_CONC" -I{} bash "$OUT/.js-fetch.sh" "$OUT/.js-dl" {} "$OUT/.js-hdrs.txt" < "$OUT/.js-urls.txt"
       cat "$OUT/.js-urls.txt" >> "$OUT/.js-done.txt"
       python3 "$QHELPER" js-extract "$OUT/.js-dl" "$MAX_JS_URLS" > "$URLTMP" 2>>"$LOGS/js.log"
@@ -1227,6 +1259,7 @@ if [ "$DO_FORMS" = 1 ]; then
   rm -f "$OUT/.targets.txt"
   export FORMS_QUEUE_FILE="$OUT/.forms-queue.txt"
   echo "[*] form stage at $(date +%H:%M:%S)"
+  stage "forms"
   echo "[*] form discovery from $(wc -l < "$OUT/pages.txt") candidate page(s) (shallow pages first, cap ${FORM_PAGE_CAP:-0}=all)"
   FI=0
   while [ "$FI" -lt "${FORM_LOOP_MAX:-100}" ]; do
@@ -1281,6 +1314,7 @@ while :; do
   BATCH_IDX=$((BATCH_IDX + 1))
   BJ="$OUT/.batch.$BATCH_IDX.$$.jsonl"
   echo "[*] query batch $BATCH_IDX at $(date +%H:%M:%S): $COUNT url(s)"
+  stage "query"
   rm -f "$OUT/.live-off.$$"
   python3 "$QHELPER" live-watch "$Q" "$BJ" "$OUT/.live-off.$$" "hit" $$ \
     >&3 2>>"$LOGS/live.log" &
@@ -1360,6 +1394,7 @@ while :; do
   PIDX=$((PIDX + 1))
   PJ="$OUT/.path.$PIDX.$$.jsonl"
   echo "[*] path batch $PIDX: $COUNT target(s)"
+  stage "path"
   rm -f "$OUT/.live-off.p.$$"
   python3 "$QHELPER" live-watch "$Q" "$PJ" "$OUT/.live-off.p.$$" "hit (path)" $$ \
     >&3 2>>"$LOGS/live.log" &
@@ -1428,6 +1463,7 @@ while :; do
   BIDX=$((BIDX + 1))
   BODYJ="$OUT/.body.$BIDX.$$.jsonl"
   echo "[*] body batch $BIDX at $(date +%H:%M:%S): $COUNT target(s)"
+  stage "body"
   timeout --foreground "${BODY_TIMEOUT:-1800}" python3 "$QHELPER" probe-body "$OUT/.body.$$.txt" "$BODYJ" \
     2>>"$LOGS/body.log"
   RC=$?
@@ -1498,6 +1534,7 @@ fi
 # ---- 11. verification (token evidence only) ----
 if [ "$DO_VERIFY" = 1 ] && [ "$TOTAL" -gt 0 ]; then
   echo "[*] verification at $(date +%H:%M:%S): planning"
+  stage "verify"
   [ "$REVERIFY" = 1 ] && python3 "$QHELPER" verify-reset "$Q" 2>>"$LOGS/verify.log"
   python3 "$QHELPER" verify-plan "$Q" "$VERIFY_MAX" 2>>"$LOGS/verify.log" \
     || die "verify-plan failed"
