@@ -161,14 +161,16 @@ HDRS=(); COOKIE=""; COOKIE_FILE=""; TOKEN=""; TOKEN_FILE=""
 
 num() { case "${1:-}" in ''|*[!0-9]*) echo 0;; *) echo "$1";; esac; }
 die() { echo "[-] $*" >&2; [ "${SILENT:-0}" = 1 ] && echo "[-] $*" >&3; exit 1; }
-warn() { echo "[!] $*" >&2; }
+warn() { [ -t 2 ] && printf '\r\033[K' >&2 2>/dev/null; echo "[!] $*" >&2; }
 # findings go to the terminal even when chatter is redirected
 emit() { if [ "$SILENT" = 1 ]; then cat >&3; else cat; fi; }
 stage() { [ "${PER_HOST_CHILD:-0}" = 1 ] || return 0
           local h; h=$(head -1 "$OUT/hosts.txt" 2>/dev/null | sed -E 's#^[a-z][a-z0-9+.-]*://##; s#[/?#].*$##')
           printf '%s|%s' "${h:-host}" "${1:-working}" > "$OUT/.stage" 2>/dev/null || true
           return 0; }
+ph_clear() { [ -t 3 ] && printf '\r\033[K' >&3 2>/dev/null; return 0; }
 say()  { [ "${PER_HOST_CHILD:-0}" = 1 ] && return 0
+         ph_clear
          if [ "$SILENT" = 1 ]; then echo "[*] $*" >&3; else echo "[*] $*"; fi; }
 usage() { awk 'NR>1 && /^set -uo/{exit} NR>1 {sub(/^# ?/,""); print}' "${BASH_SOURCE[0]}"; }
 
@@ -386,6 +388,7 @@ run_per_host() {
   }
 
   ph_status() {
+    [ -t 3 ] || return 0
     local line p st last=""
     while :; do
       line=""
@@ -396,6 +399,7 @@ run_per_host() {
         line="$line${st} | "
       done
       line="${line% | }"
+      [ "${#line}" -gt 120 ] && line="${line:0:117}..."
       if [ -n "$line" ] && [ "$line" != "$last" ]; then
         printf '\r[*] %s\033[K' "$line" >&3
         last="$line"
