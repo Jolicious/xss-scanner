@@ -377,11 +377,6 @@ run_per_host() {
   return 0
 }
 
-if [ "$PER_HOST" = 1 ] && [ "${PER_HOST_CHILD:-0}" != "1" ]; then
-  run_per_host
-  exit $?
-fi
-
 # ---------- live notify helper (called after each batch with hits) ----------
 notify_file() { # $1 = message file, $2 = label
   [ "$NOTIFY" = 1 ] || return 0
@@ -533,6 +528,12 @@ fi
 if [ "$SILENT" = 1 ]; then
   exec >>"$LOGS/run.log" 2>&1
 fi
+
+if [ "$PER_HOST" = 1 ] && [ "${PER_HOST_CHILD:-0}" != "1" ]; then
+  run_per_host
+  exit $?
+fi
+
 
 # ---- per-domain completion tracking ----
 HOSTS_DONE_LAST=""
