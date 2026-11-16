@@ -675,6 +675,9 @@ def _encoded_forms(marker):
     for ch in ("<", ">", "'", '"', "&"):
         js = js.replace(ch, "\\u%04x" % ord(ch))
     forms.add(js)
+    # server-side JS escaping: \' and \" and \x27 style
+    forms.add(marker.replace("'", "\\'").replace('"', '\\"'))
+    forms.add(marker.replace("'", "\\x27").replace('"', "\\x22"))
     return forms
 
 

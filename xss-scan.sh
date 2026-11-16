@@ -1465,7 +1465,13 @@ fi
 # ---- 9c. escaped reflections (sink exists, markup encoded) ----
 ESC_N=$(python3 "$QHELPER" escaped-report "$Q" "$OUT/escaped.txt" 2>/dev/null || echo 0)
 case "${ESC_N:-0}" in ''|*[!0-9]*) ESC_N=0;; esac
-[ "$ESC_N" -gt 0 ] && echo "[*] escaped reflections: $ESC_N (see $OUT/escaped.txt)"
+if [ "$ESC_N" -gt 0 ]; then
+  echo "[*] escaped reflections: $ESC_N (see $OUT/escaped.txt)"
+  if [ "$NOTIFY" = 1 ] && command -v notify >/dev/null 2>&1; then
+    notify_file "$OUT/escaped.txt" "escaped reflections" \
+      || warn "escaped notify failed (see logs/notify.log)"
+  fi
+fi
 
 # ---- 10. findings export ----
 python3 "$QHELPER" ctxfilter "$Q" 2>>"$LOGS/context.log" || true
