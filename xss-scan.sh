@@ -1286,6 +1286,25 @@ EOS
     fi
     rm -rf "$OUT/.js-inline"
 
+    # one extra bundle round: chunks referenced by the pages we just parsed
+    python3 "$QHELPER" list-js "$Q" "$OUT/.js-all.txt" >/dev/null 2>&1 || : > "$OUT/.js-all.txt"
+    if [ -s "$OUT/.js-done.txt" ]; then
+      grep -vxF -f "$OUT/.js-done.txt" "$OUT/.js-all.txt" > "$OUT/.js-urls.txt" 2>/dev/null \
+        || cp "$OUT/.js-all.txt" "$OUT/.js-urls.txt"
+    else
+      cp "$OUT/.js-all.txt" "$OUT/.js-urls.txt"
+    fi
+    NEWN=$(wc -l < "$OUT/.js-urls.txt" | tr -d ' ')
+    case "${NEWN:-0}" in ''|*[!0-9]*) NEWN=0;; esac
+    if [ "$NEWN" -gt 0 ]; then
+      echo "[*] js mining round 4: $NEWN new bundle(s) from route pages"
+      xargs -P "$JS_CONC" -I{} bash "$OUT/.js-fetch.sh" "$OUT/.js-dl" {} "$OUT/.js-hdrs.txt" < "$OUT/.js-urls.txt"
+      cat "$OUT/.js-urls.txt" >> "$OUT/.js-done.txt"
+      python3 "$QHELPER" js-extract "$OUT/.js-dl" "$MAX_JS_URLS" > "$URLTMP" 2>>"$LOGS/js.log"
+      if [ -s "$URLTMP" ]; then ingest < "$URLTMP" 2>>"$LOGS/js.log" || true; fi
+      : > "$URLTMP"
+    fi
+
     python3 "$QHELPER" discovery-set "$Q" js pages done 0
     python3 "$QHELPER" meta-set "$Q" js_rev 3 2>/dev/null || true
     rm -rf "$OUT/.js-dl" "$OUT/.js-fetch.sh" "$OUT/.js-all.txt" "$OUT/.js-urls.txt"

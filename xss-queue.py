@@ -1542,6 +1542,7 @@ def cmd_inline_scripts(db, out_dir, limit="200"):
     `js-extract` can process them unchanged.
     """
     import glob as _glob
+    from urllib.parse import urljoin
     allowed = load_policy(SCOPE_FILE)
     if not allowed:
         print("[-] inline-scripts: scope policy missing", file=sys.stderr)
@@ -1576,6 +1577,17 @@ def cmd_inline_scripts(db, out_dir, limit="200"):
         res = http_request(page, allowed, "GET")
         if res["error"] or "html" not in (res["ctype"] or "").lower():
             continue
+        # external chunks referenced by this page belong to the next bundle round
+        for src_url in re.findall(r"<script[^>]+src=[\"\']([^\"\']+)[\"\']", res["body"], re.I):
+            try:
+                absu = urljoin(page, src_url.strip())
+            except Exception:
+                continue
+            if not absu.lower().split("?")[0].endswith((".js", ".mjs")):
+                continue
+            if in_scope(absu, allowed):
+                c.execute("INSERT OR IGNORE INTO jsurls(url) VALUES(?)", (absu,))
+        c.commit()
         blocks = [b for b in script_re.findall(res["body"]) if len(b.strip()) > 40]
         if not blocks:
             continue
@@ -3046,6 +3058,8 @@ def _dispatch(argv):
         "harvest": cmd_harvest,
         "show-findings": cmd_show_findings, "show-confirmed": cmd_show_confirmed,
         "confirmed-new": cmd_confirmed_new, "api-reflect": cmd_api_reflect,
+        "new-candidates": cmd_new_candidates, "escaped-report": cmd_escaped_report,
+        "blocked-report": cmd_blocked_report,
         "live-watch": cmd_live_watch, "host-status": cmd_host_status,
         "merge-run": cmd_merge_run,
         "js-extract": cmd_js_extract, "inline-scripts": cmd_inline_scripts,
