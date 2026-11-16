@@ -151,7 +151,7 @@ NUCLEI_TIMEOUT="${NUCLEI_TIMEOUT:-3600}"
 VERIFY_TIMEOUT="${VERIFY_TIMEOUT:-900}"
 DO_GAU=1; DO_CRAWL=1; DO_VERIFY=0; DO_FORMS=1; FORMS_POST=1; DO_JS=1
 VERIFY_EXPLICIT=0; RATE_SET=0; CONC_SET=0; DISK_SET=0; NOTIFY_EXPLICIT=0
-COMPACT=0; RESUME=1; RETRY_FAILED=0; STRICT=1; REDISCOVER=0
+COMPACT=0; RESUME=1; CONTINUE=0; RETRY_FAILED=0; STRICT=1; REDISCOVER=0
 SILENT=0; PER_HOST=0; PER_HOST_CHUNK=1; PER_HOST_JOBS=3; DO_SITEMAP=1; API_REFLECT=0
 REVERIFY=0; FORCE_CONFIG=0; AMEND_LIMITS=0; DO_REPORT=1
 NOTIFY=0; NOTIFY_SUMMARY=0; NOTIFY_LIVE=1; NOTIFY_SENT_ANY=0; NOTIFY_IDS=(); NOTIFY_CANDIDATES=1
@@ -216,6 +216,7 @@ while [ $# -gt 0 ]; do
     --verify-max)     VERIFY_MAX="${2:-}"; shift 2;;
     --verify-batch)   VERIFY_BATCH="${2:-}"; shift 2;;
     --no-resume)      RESUME=0; shift;;
+    --continue)       RESUME=1; CONTINUE=1; shift;;
     --retry-failed)   RETRY_FAILED=1; shift;;
     --force-config)   FORCE_CONFIG=1; shift;;
     --amend-limits)   AMEND_LIMITS=1; shift;;
@@ -330,20 +331,25 @@ run_per_host() {
   echo "[*] per-host mode: $total host(s), $chunk per batch, one run dir reused"
 
   # one httpx pass over the entire list, then only alive hosts get a pipeline
-  echo "[*] alive probe (httpx over $total host(s))"
-  HA=(-l "$hostf/hosts.txt" -silent -threads "${THREADS:-50}")
-  [ -n "$COOKIE" ] && HA+=(-H "Cookie: $COOKIE")
-  timeout --foreground "${STEP_TIMEOUT:-1800}" "$HTTPX_BIN" "${HA[@]}" \
-    -o "$hostf/alive.txt" 2>>"$OUT/logs/per-host.log" || true
-  ALIVE_BATCH=$(num "$(wc -l < "$hostf/alive.txt" 2>/dev/null || echo 0)")
+  if [ "$CONTINUE" = 1 ] && [ -s "$OUT/.alive-batch.txt" ]; then
+    say "--continue: reusing alive list ($(wc -l < "$OUT/.alive-batch.txt" | tr -d ' ') host(s))"
+  else
+    echo "[*] alive probe (httpx over $total host(s))"
+    HA=(-l "$hostf/hosts.txt" -silent -threads "${THREADS:-50}")
+    [ -n "$COOKIE" ] && HA+=(-H "Cookie: $COOKIE")
+    timeout --foreground "${STEP_TIMEOUT:-1800}" "$HTTPX_BIN" "${HA[@]}" \
+      -o "$OUT/.alive-batch.txt" 2>>"$OUT/logs/per-host.log" || true
+  fi
+  ALIVE_BATCH=$(num "$(wc -l < "$OUT/.alive-batch.txt" 2>/dev/null || echo 0)")
   echo "[*] alive: $ALIVE_BATCH/$total — only these get a pipeline"
   [ "$ALIVE_BATCH" -gt 0 ] || die "no alive hosts in $IN (see logs/per-host.log)"
   total="$ALIVE_BATCH"
-  split -l "$chunk" -d -a 5 "$hostf/alive.txt" "$hostf/h."
+  split -l "$chunk" -d -a 5 "$OUT/.alive-batch.txt" "$hostf/h."
   PH_JOBS="${PER_HOST_JOBS:-3}"
   case "$PH_JOBS" in ''|*[!0-9]*) PH_JOBS=3;; esac
   [ "$PH_JOBS" -ge 1 ] || PH_JOBS=1
   echo "[*] per-host parallel: $PH_JOBS host(s) at a time"
+  [ "$CONTINUE" = 1 ] && say "--continue: skipping $(num "$(wc -l < "$OUT/hosts-done.txt" 2>/dev/null || echo 0)") finished host(s)"
 
   ph_one() {
     local cf="$1" part CF_HOST prc PTMO
