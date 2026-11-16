@@ -60,7 +60,9 @@ BODY_PAYLOADS = _ALL_PAYLOADS if os.environ.get("XSS_FULL_PAYLOADS") == "1" else
 RAW_MARKERS = ("<svg onload=", "<svg/onload=", "<img src=x onerror=",
                "</script><svg/onload=", "<script>alert(", "</script><script>",
                '<link rel="x" href="')
-API_PARAMS = ("limit", "page", "id", "q", "query", "sort", "offset", "size", "filter")
+API_PARAMS = ("limit", "page", "start", "end", "from", "to", "offset",
+              "size", "count", "id", "q", "query", "term", "search",
+              "sort", "filter", "name", "email", "user")
 MANUAL_TEMPLATES = ("reflected-body-xss",)
 COMMON_PARAMS = ["p", "q", "id", "page", "site", "url", "file", "name",
                  "search", "query", "level", "product", "version"]

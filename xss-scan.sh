@@ -1325,7 +1325,11 @@ if [ "${PER_HOST_CHILD:-0}" = 1 ] && [ -z "${RATE_ENV:-}" ] && [ "$RATE" -lt 12 
 fi
 
 # ---- 6. plan work queues ----
-python3 "$QHELPER" path-plan "$Q" "$OUT/path-targets.txt" 2>/dev/null
+# plan paths for everything discovered (jobs + URL bases), not just the origin
+python3 "$QHELPER" list-targets "$Q" "$OUT/.plan-targets.txt" >/dev/null 2>&1 || true
+{ cat "$OUT/path-targets.txt" 2>/dev/null; cat "$OUT/.plan-targets.txt" 2>/dev/null; } \
+  | sort -u > "$OUT/.plan-all.txt" 2>/dev/null || cp "$OUT/path-targets.txt" "$OUT/.plan-all.txt"
+python3 "$QHELPER" path-plan "$Q" "$OUT/.plan-all.txt" 2>>"$LOGS/path-plan.log"
 PROBE_HDRS=()
 [ "${AUTH_HDRS[*]+x}" ] && PROBE_HDRS=("${AUTH_HDRS[@]}")
 export PROBE_HEADERS=$(python3 -c 'import json,sys
