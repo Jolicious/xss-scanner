@@ -2715,6 +2715,16 @@ def cmd_verify_reset(db):
 
 
 # -------------------------------------------------------------------- exports
+def cmd_meta_get(db, key):
+    c = connect(db)
+    ensure(c)
+    v = meta_get(c, key, "")
+    if v is None:
+        return 1
+    print(v)
+    return 0
+
+
 def cmd_meta_set(db, key, value):
     c = connect(db)
     ensure(c)
@@ -2966,7 +2976,7 @@ def _dispatch(argv):
         "verify-report": cmd_verify_report,
         "verify-reset": cmd_verify_reset, "discovery-set": cmd_discovery_set,
         "discovery-status": cmd_discovery_status, "discovery-done": cmd_discovery_done,
-        "discovery-pending": cmd_discovery_pending, "meta-set": cmd_meta_set, "promote-jobs": cmd_promote_jobs, "promote-urls": cmd_promote_urls,
+        "discovery-pending": cmd_discovery_pending, "meta-set": cmd_meta_set, "meta-get": cmd_meta_get, "promote-jobs": cmd_promote_jobs, "promote-urls": cmd_promote_urls,
         "export-confirmed": cmd_export_confirmed,
     }
     rc_cmds = {

@@ -1211,6 +1211,8 @@ if [ "$DO_JS" = 1 ]; then
   # JS bundles hide endpoints that no crawler follows. One pass is not enough:
   # a chunk references more chunks, so iterate until no new bundles appear.
   JSD=$(python3 "$QHELPER" discovery-status "$Q" js pages 2>/dev/null)
+  JS_REV=$(python3 "$QHELPER" meta-get "$Q" js_rev 2>/dev/null || echo "")
+  [ "$JS_REV" = "3" ] || REDISCOVER=1
   if [ "$REDISCOVER" = 1 ] || [ "$JSD" != "done" ]; then
     JS_CONC="${JS_CONC:-8}"
     MAX_JS="${MAX_JS:-4000}"
@@ -1266,6 +1268,7 @@ EOS
       [ "$JRC" -eq 0 ] || { warn "js-extract rc=$JRC"; break; }
     done
     python3 "$QHELPER" discovery-set "$Q" js pages done 0
+    python3 "$QHELPER" meta-set "$Q" js_rev 3 2>/dev/null || true
     rm -rf "$OUT/.js-dl" "$OUT/.js-fetch.sh" "$OUT/.js-all.txt" "$OUT/.js-urls.txt"
   fi
 fi
@@ -1722,6 +1725,12 @@ elif [ "$(( CONF_N + MAN_N ))" -gt 0 ]; then
   warn "coverage incomplete (see $OUT/coverage.json); findings valid, run not finished"
   STATUS=3
 else
+  # a partial scan must not be reported as a finished host
+  _h=$(head -1 "$OUT/hosts.txt" 2>/dev/null | sed -E 's#^[a-z][a-z0-9+.-]*://##; s#[/?#].*$##')
+  if [ -n "$_h" ] && [ -f "$OUT/hosts-done.txt" ]; then
+    grep -vxF "$_h" "$OUT/hosts-done.txt" > "$OUT/hosts-done.tmp" 2>/dev/null || true
+    mv -f "$OUT/hosts-done.tmp" "$OUT/hosts-done.txt" 2>/dev/null || true
+  fi
   warn "run incomplete: coverage.complete is false (see $OUT/coverage.json)"
   echo "[*] partial: $OUT" >&2; [ "$SILENT" = 1 ] && echo "[!] partial: $OUT" >&3
 fi
