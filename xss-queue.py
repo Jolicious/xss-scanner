@@ -1001,6 +1001,9 @@ def cmd_merge_run(child_dir, parent_dir):
             pass
     else:
         complete = False
+        parts[os.path.basename(child_dir.rstrip("/\\"))] = {
+            "complete": False, "findings": 0, "confirmed_candidates": 0,
+            "missing_coverage": True}
     complete = bool(parts) and all(bool(v.get("complete")) for v in parts.values())
     hosts_done = 0
     try:
@@ -2858,8 +2861,13 @@ def cmd_verify_batch(db, n, out_file, ids_file):
         open(out_file, "w").close()
         open(ids_file, "w").close()
         return 2
+    reportable = REPORTABLE_SQL.replace("context", "f.context")
     rows, ids = _claim_rows(
-        c, "SELECT id, injected FROM attempts WHERE state='pending' ORDER BY id LIMIT ?",
+        c,
+        "SELECT a.id, a.injected FROM attempts a"
+        " LEFT JOIN findings f ON f.id = a.finding_id"
+        " WHERE a.state='pending' AND (a.finding_id IS NULL OR " + reportable + ")"
+        " ORDER BY a.id LIMIT ?",
         (), n)
     keep = []
     with open(out_file, "w", encoding="utf-8") as fh:
@@ -3181,8 +3189,7 @@ def cmd_ctxfilter(db, keep="0"):
             json_only += 1
             c.execute("UPDATE findings SET context='json_data' WHERE id=?", (fid,))
             if str(keep) != "1":
-                c.execute("DELETE FROM attempts WHERE finding_id=?", (fid,))
-                # keep the row (evidence) but mark it non-reportable
+                # keep attempts as audit history; only the finding's verdict changes
                 c.execute("UPDATE findings SET context='json_data' WHERE id=?", (fid,))
                 dropped += 1
         else:
@@ -3223,8 +3230,12 @@ def cmd_coverage(db, out_file):
                     if k == "path" and s in ("pending", "running", "failed"))
     body_open = sum(v for (k, s), v in jobs.items()
                     if k in ("form", "json") and s in ("pending", "running", "failed"))
-    att_open = att.get("pending", 0) + att.get("running", 0)
-    att_err = att.get("error", 0)
+    att_open = c.execute(
+        "SELECT COUNT(*) FROM attempts a JOIN findings f ON f.id=a.finding_id"
+        " WHERE a.state IN ('pending','running') AND " + REPORTABLE_SQL).fetchone()[0]
+    att_err = c.execute(
+        "SELECT COUNT(*) FROM attempts a JOIN findings f ON f.id=a.finding_id"
+        " WHERE a.state='error' AND " + REPORTABLE_SQL).fetchone()[0]
     ph_manual = ",".join("'%s'" % t for t in MANUAL_TEMPLATES)
     eligible = c.execute(("SELECT COUNT(*) FROM findings WHERE template_id NOT IN (%s)"
                           " AND " % ph_manual) + REPORTABLE_SQL).fetchone()[0]
