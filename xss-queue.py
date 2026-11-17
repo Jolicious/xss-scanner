@@ -1869,8 +1869,19 @@ def cmd_body_commit(db, id_file, jsonl_file, rc="0", status_file=""):
                         if l.strip()]
         except OSError:
             statuses = []
-    if int(rc) != 0 and not statuses:
-        print("[-] body-commit rejected: probe rc=%s (requests failed)" % rc,
+    valid = {"ok", "failed", "deferred"}
+    if statuses:
+        if len(statuses) != len(ids):
+            print("[-] body-commit rejected: %d status record(s) for %d job(s)"
+                  % (len(statuses), len(ids)), file=sys.stderr)
+            return 1
+        bad = [x for x in statuses if x not in valid]
+        if bad:
+            print("[-] body-commit rejected: unknown status value(s) %s"
+                  % ",".join(sorted(set(bad))), file=sys.stderr)
+            return 1
+    elif int(rc) != 0:
+        print("[-] body-commit rejected: probe rc=%s without status records" % rc,
               file=sys.stderr)
         return 1
     try:
@@ -2505,6 +2516,7 @@ def cmd_probe_body(spec_file, out_jsonl, status_file=""):
                     recs, st, done = fut.result()
                 except Exception:
                     failed += 1
+                    _status.append("failed")
                     continue
                 targets += 1
                 if st["failed"]:
