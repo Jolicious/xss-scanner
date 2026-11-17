@@ -157,6 +157,7 @@ if [ "${XSS_FORMS_POST:-0}" = 1 ]; then FORMS_POST=1; FORMS_POST_EXPLICIT=1; FOR
 DO_GAU=1; DO_CRAWL=1; DO_VERIFY=0; DO_FORMS=1; DO_JS=1
 : "${FORMS_POST:=0}"
 VERIFY_EXPLICIT=0; RATE_SET=0; CONC_SET=0; DISK_SET=0; NOTIFY_EXPLICIT=0
+ACCEPT_FAILED=0
 COMPACT=0; RESUME=1; CONTINUE=0; RECHECK=0; RETRY_FAILED=0; STRICT=1; REDISCOVER=0
 SILENT=0; PER_HOST=0; PER_HOST_CHUNK=1; PER_HOST_JOBS=3; DO_REQUEUE_THROTTLED=1; DO_SITEMAP=1; API_REFLECT=0
 REVERIFY=0; FORCE_CONFIG="${FORCE_CONFIG:-0}"; AMEND_LIMITS=0; DO_REPORT=1
@@ -230,6 +231,7 @@ while [ $# -gt 0 ]; do
     --continue)       RESUME=1; CONTINUE=1; shift;;
     --recheck)        RESUME=1; RECHECK=1; shift;;
     --retry-failed)   RETRY_FAILED=1; shift;;
+    --accept-failed)  ACCEPT_FAILED=1; shift;;
     --force-config)   FORCE_CONFIG=1; shift;;
     --amend-limits)   AMEND_LIMITS=1; shift;;
     --strict)         STRICT=1; shift;;
@@ -1397,7 +1399,8 @@ EOS
       [ "$JRC" -eq 0 ] || { warn "js-extract rc=$JRC"; break; }
     done
     # record what discovery actually covered versus what it was allowed to cover
-    JSD=$( [ -f "$OUT/.js-all.txt" ] && wc -l < "$OUT/.js-all.txt" | tr -d ' ' || echo 0)
+    JSD=$( { cat "$OUT/.js-all.txt" "$OUT/.js-done.txt" 2>/dev/null || true; } \
+            | sed '/^$/d' | sort -u | wc -l | tr -d ' ')
     JSP=$( [ -f "$OUT/.js-done.txt" ] && sort -u "$OUT/.js-done.txt" | wc -l | tr -d ' ' || echo 0)
     case "${JSD:-0}" in ''|*[!0-9]*) JSD=0;; esac
     case "${JSP:-0}" in ''|*[!0-9]*) JSP=0;; esac
@@ -1918,6 +1921,10 @@ fi
 host_progress
 
 # ---- 12. coverage / cleanup ----
+if [ "$ACCEPT_FAILED" = 1 ]; then
+  python3 "$QHELPER" body-close-failed "$Q" 2>>"$LOGS/body.log" \
+    || warn "accept-failed: could not close failed body jobs"
+fi
 python3 "$QHELPER" coverage "$Q" "$OUT/coverage.json" || warn "coverage export failed"
 echo "[*] queue: $(python3 "$QHELPER" stats "$Q")"
 [ "$FAILED_BATCHES" -gt 0 ] && warn "$FAILED_BATCHES failed batch(es); re-run -o $OUT --retry-failed"

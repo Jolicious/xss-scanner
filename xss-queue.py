@@ -909,6 +909,8 @@ def cmd_merge_run(child_dir, parent_dir):
                           os.path.join(child_dir, "confirmed.jsonl"))
     _append_unique(os.path.join(parent_dir, "verify-report.jsonl"),
                    os.path.join(child_dir, "verify-report.jsonl"))
+    _append_unique(os.path.join(parent_dir, "reflections.txt"),
+                   os.path.join(child_dir, "reflections.txt"))
     hosts = _append_unique(os.path.join(parent_dir, "hosts-done.txt"),
                            os.path.join(child_dir, "hosts-done.txt"))
     urls_done = _append_unique(os.path.join(parent_dir, "urls-done.txt"),
@@ -1904,6 +1906,33 @@ def cmd_path_batch(db, n, out_file):
 
 def cmd_body_batch(db, n, out_file):
     _claim(db, ["form", "json"], n, out_file)
+
+
+def cmd_body_close_failed(db):
+    """Park body jobs that already exhausted their retries as 'skipped'.
+
+    Used by --accept-failed: the target is recorded as untested (not as
+    covered), so coverage stays honest while the host can complete.
+    """
+    c = connect(db)
+    ensure(c)
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        n = c.execute("SELECT COUNT(*) FROM jobs WHERE kind IN ('form','json')"
+                      " AND state='failed'").fetchone()[0]
+        c.execute("UPDATE jobs SET state='skipped' WHERE kind IN ('form','json')"
+                  " AND state='failed'")
+        c.execute("COMMIT")
+    except Exception as exc:
+        try:
+            c.execute("ROLLBACK")
+        except Exception:
+            pass
+        print("[-] body-close-failed: %s" % exc, file=sys.stderr)
+        return 1
+    print("[*] body-close-failed: %d target(s) marked skipped (untested)" % n,
+          file=sys.stderr)
+    return 0
 
 
 def cmd_body_skip(db):
@@ -3573,6 +3602,7 @@ def _dispatch(argv):
         "js-extract": cmd_js_extract, "inline-scripts": cmd_inline_scripts,
         "path-abort": cmd_path_abort, "body-batch": cmd_body_batch,
         "body-skip": cmd_body_skip, "why": cmd_why,
+        "body-close-failed": cmd_body_close_failed,
         "body-abort": cmd_body_abort, "export": cmd_export, "stats": cmd_stats,
         "coverage": cmd_coverage, "ctxfilter": cmd_ctxfilter, "verify-plan": cmd_verify_plan,
         "verify-report": cmd_verify_report,
