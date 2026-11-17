@@ -70,6 +70,9 @@ exec 3>&1
 ORIG_ARGS=("$@")
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# go-installed tools (gau, katana, httpx, nuclei) live in ~/go/bin and are
+# usually absent from non-interactive PATH (cron, systemd, CI)
+export PATH="$HOME/go/bin:/usr/local/bin:$PATH"
 
 # ---- portable shims: macOS/BSD lacks several GNU tools this script uses ----
 if ! command -v timeout >/dev/null 2>&1; then
@@ -1455,7 +1458,7 @@ host_progress
 # crawling, not to the batch scanner)
 if [ "${PER_HOST_CHILD:-0}" = 1 ] && [ -z "${RATE_ENV:-}" ] && [ "$RATE" -lt 12 ]; then
   RATE=12
-  echo "[*] scan rate raised to  rps after crawl"
+  echo "[*] scan rate raised to $RATE rps after crawl"
 fi
 
 # ---- 6. plan work queues ----

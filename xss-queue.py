@@ -2610,6 +2610,7 @@ def cmd_probe_body(spec_file, out_jsonl, status_file=""):
                        "variant": variant, "outcome": outcome, "ts": now()})
 
     def probe_one(spec):
+        errs = 0
         recs = []
         st = {"failed": 0, "authfail": 0, "oos": 0}
         url = spec.get("url", "")
@@ -2637,7 +2638,10 @@ def cmd_probe_body(spec_file, out_jsonl, status_file=""):
                     if res["error"]:
                         _note(url, method, ".".join(map(str, path)), -1, "error")
                         st["failed"] += 1
-                        break
+                        errs += 1
+                        if errs >= 3:
+                            break
+                        continue
                     if res["status"] in (401, 403):
                         _note(url, method, ".".join(map(str, path)), -1, "authfail")
                         st["authfail"] += 1
@@ -2689,7 +2693,10 @@ def cmd_probe_body(spec_file, out_jsonl, status_file=""):
                 if res["error"]:
                     _note(url, method, pairs[idx][0], idx, "error")
                     st["failed"] += 1
-                    break
+                    errs += 1
+                    if errs >= 3:
+                        break
+                    continue
                 if res["status"] in (401, 403):
                     _note(url, method, pairs[idx][0], idx, "authfail")
                     st["authfail"] += 1
