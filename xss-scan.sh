@@ -1372,12 +1372,11 @@ if [ "$DO_FORMS" = 1 ]; then
     | awk '
       {
         u=$0; path=u;
+        sub(/^[a-z][a-z0-9+.-]*:\/\//, "", path);   # drop scheme before checks
+        sub(/[?#].*$/, "", path);
         # JS route templates ("/:slug/dp/:id", "/api/*") are not real pages
-        sub(/[?#].*$/, "", path);
         if (path ~ /[:*]/) next;
-        path=u;
-        sub(/^[a-z]+:\/\/[^\/]+/, "", path);
-        sub(/[?#].*$/, "", path);
+        sub(/^[^\/]+/, "", path);
         if (path == "") path="/";
         n=split(path, a, "/");
         last=a[n];
@@ -1450,6 +1449,7 @@ while :; do
   [ "$COUNT" -gt 0 ] || break
   BATCH_IDX=$((BATCH_IDX + 1))
   BJ="$OUT/.batch.$BATCH_IDX.$$.jsonl"
+  cp -f "$OUT/.batch.$$.txt" "$OUT/.batch.$$.bak" 2>/dev/null || true
   echo "[*] query batch $BATCH_IDX at $(date +%H:%M:%S): $COUNT url(s)"
   stage "query"
   rm -f "$OUT/.live-off.$$"
@@ -1466,12 +1466,17 @@ while :; do
   [ -s "$BJ" ] && python3 "$QHELPER" live-watch "$Q" "$BJ" "$OUT/.live-off.$$" "hit" 0 \
     >&3 2>>"$LOGS/live.log"
   if [ "$RC" -eq 0 ]; then
+    if [ ! -s "$OUT/.batch.$$.txt" ] && [ -s "$OUT/.batch.$$.bak" ]; then
+      cp -f "$OUT/.batch.$$.bak" "$OUT/.batch.$$.txt" 2>/dev/null || true
+    fi
     if ! python3 "$QHELPER" commit-batch "$Q" "$OUT/.batch.$$.txt" "$BJ" 2>>"$LOGS/commit.log"; then
       FAILED_BATCHES=$((FAILED_BATCHES + 1))
       warn "batch $BATCH_IDX commit rejected (missing/invalid output); urls kept for retry"
       [ -s "$BJ" ] && cp -f "$BJ" "$OUT/kept-batch-$BATCH_IDX.jsonl"
       python3 "$QHELPER" abort-batch "$Q" "$OUT/.batch.$$.txt" 2>/dev/null || true
       mv -f "$OUT/.batch.$$.txt" "$OUT/failed-batch-$BATCH_IDX.txt" 2>/dev/null || true
+    rm -f "$OUT/.batch.$$.bak"
+      rm -f "$OUT/.batch.$$.bak"
       [ "$STRICT" = 1 ] && die "batch commit rejected; state retained (re-run -o $OUT)"
     else
       python3 "$QHELPER" ctxfilter "$Q" 2>>"$LOGS/context.log" || true
@@ -1504,7 +1509,7 @@ while :; do
           esac
         done
       fi
-      rm -f "$OUT/.batch.$$.txt" "$BJ"
+      rm -f "$OUT/.batch.$$.txt" "$OUT/.batch.$$.bak" "$BJ"
       trim_log "$LOGS/nuclei-batch-$BATCH_IDX.log" 4194304
     fi
   else
