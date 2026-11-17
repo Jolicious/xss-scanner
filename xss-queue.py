@@ -1096,15 +1096,34 @@ def cmd_host_status(db, hosts_file, done_file, log_file="", urls_done_file=""):
             blocked.add(h)
         elif status in ("partial", "processing") and str(key) in ("pages", "all"):
             blocked.update(scope)
-    # a host with unfinished verification attempts is not complete
-    vpending = {}
+    # verification state must use the same eligibility rules as the planner
+    try:
+        verify_req = int(meta_get(c, "verify_requested", "0") or 0)
+    except Exception:
+        verify_req = 0
+    vpend = {}
     for url, state in c.execute(
             "SELECT f.url, a.state FROM attempts a JOIN findings f ON f.id=a.finding_id"
-            " WHERE a.state IN ('pending','running','error')"):
+            " WHERE a.state IN ('pending','running','error') AND " + REPORTABLE_SQL):
         h = _host_key(url)
         if h in scope:
-            vpending[h] = vpending.get(h, 0) + 1
-    for h, n in vpending.items():
+            vpend[h] = vpend.get(h, 0) + 1
+    if verify_req:
+        # reportable findings that never got an attempt (e.g. --verify-max cap)
+        ph = ",".join("?" for _ in MANUAL_TEMPLATES)
+        try:
+            rows = c.execute(
+                "SELECT f.url FROM findings f"
+                " LEFT JOIN attempts a ON a.finding_id = f.id"
+                " WHERE a.id IS NULL AND f.template_id NOT IN (%s)"
+                " AND " % ph + REPORTABLE_SQL, list(MANUAL_TEMPLATES)).fetchall()
+        except Exception:
+            rows = []
+        for (url,) in rows:
+            h = _host_key(url)
+            if h in scope:
+                vpend[h] = vpend.get(h, 0) + 1
+    for h, n in vpend.items():
         pending[h] = pending.get(h, 0) + n
     completed = sorted((h for h in scope if not pending.get(h)
                         and h not in blocked and done.get(h)),
