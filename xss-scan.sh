@@ -339,6 +339,12 @@ run_per_host() {
     echo "[*] alive probe (httpx over $total host(s))"
     HA=(-l "$hostf/hosts.txt" -silent -threads "${THREADS:-50}")
     [ -n "$COOKIE" ] && HA+=(-H "Cookie: $COOKIE")
+    for _h in ${HDRS[@]+"${HDRS[@]}"}; do HA+=(-H "$_h"); done
+    if [ -n "$TOKEN_FILE" ] && [ -r "$TOKEN_FILE" ]; then
+      HA+=(-H "Authorization: Bearer $(tr -d '\r\n' < "$TOKEN_FILE")")
+    elif [ -n "$TOKEN" ]; then
+      HA+=(-H "Authorization: Bearer $TOKEN")
+    fi
     timeout --foreground "${STEP_TIMEOUT:-1800}" "$HTTPX_BIN" "${HA[@]}" \
       -o "$OUT/.alive-batch.txt" 2>>"$OUT/logs/per-host.log" || true
   fi
@@ -385,12 +391,12 @@ run_per_host() {
     PTMO="${PER_HOST_TIMEOUT:-0}"
     if [ "$PTMO" -gt 0 ]; then
       timeout --foreground "$PTMO" \
-        env PER_HOST_CHILD=1 FORCE_CONFIG="$CFORCE" PRESEED_ALIVE=1 bash "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} -i "$cf" -o "$part" \
+        env PER_HOST_CHILD=1 FORCE_CONFIG="$CFORCE" PRESEED_ALIVE=1 SEED_FILE="$_cfseeds" bash "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} -i "$cf" -o "$part" \
         >&3 2>>"$OUT/logs/per-host.log"
       prc=$?
       [ "$prc" -eq 124 ] && warn "per-host: $(tr '\n' ' ' < "$cf") hit ${PTMO}s budget; partial results kept"
     else
-      env PER_HOST_CHILD=1 FORCE_CONFIG="$CFORCE" PRESEED_ALIVE=1 bash "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} -i "$cf" -o "$part" \
+      env PER_HOST_CHILD=1 FORCE_CONFIG="$CFORCE" PRESEED_ALIVE=1 SEED_FILE="$_cfseeds" bash "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} -i "$cf" -o "$part" \
         >&3 2>>"$OUT/logs/per-host.log"
       prc=$?
     fi
@@ -449,6 +455,13 @@ run_per_host() {
       [ "$RUNNING" -lt "$PH_JOBS" ] && break
       sleep 1
     done
+    _cfseeds="$cf.seeds"
+    : > "$_cfseeds"
+    while IFS= read -r _u; do
+      case "$_u" in http://*|https://*) ;; *) continue;; esac
+      _uh=$(printf '%s' "$_u" | sed -E 's#^[a-z][a-z0-9+.-]*://##; s#[/?#].*$##')
+      grep -qxF "$_uh" "$cf" && printf '%s\n' "$_u" >> "$_cfseeds"
+    done < "$IN"
     ph_one "$cf" &
     WPIDS+=("$!")
   done
@@ -1000,7 +1013,9 @@ echo "[*] discovery -> queue (batch $BATCH_SIZE, cap $MAX_TOTAL)"
 ingest() { python3 "$QHELPER" ingest "$Q" "$OUT/hosts.txt" "$MAX_TOTAL"; }
 PRODUCER_RC=0
 
-{ cat "$OUT/seed-urls.txt" 2>/dev/null || true; sed 's#$#/?x=1#' "$OUT/origins.txt"; } | ingest
+{ cat "$OUT/seed-urls.txt" 2>/dev/null || true;
+    [ -n "${SEED_FILE:-}" ] && [ -r "$SEED_FILE" ] && cat "$SEED_FILE" 2>/dev/null;
+    sed 's#$#/?x=1#' "$OUT/origins.txt"; } | ingest
 PS=("${PIPESTATUS[@]}")
 [ "${PS[0]:-0}" -eq 0 ] || warn "seed/origin producer rc=${PS[0]} (missing optional seed data)"
 [ "${PS[1]:-1}" -eq 0 ] || die "ingest failed for seeds/origins"

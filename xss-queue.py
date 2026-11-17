@@ -3070,6 +3070,9 @@ def cmd_coverage(db, out_file):
                           and src_fail == 0)
     verification_complete = (verify_requested == 1 and att_open == 0 and att_err == 0
                              and capped == 0 and unplanned == 0)
+    tests_executed = (urls.get("done", 0) + sum(
+        v for (k, st), v in jobs.items() if k == "path" and st == "done") + sum(
+        v for (k, st), v in jobs.items() if k in ("form", "json") and st == "done"))
     work_complete = (discovery_complete and url_open == 0 and path_open == 0
                      and body_open == 0 and jobs_capped == 0)
     urls_capped = urls.get("deferred", 0)
@@ -3081,6 +3084,7 @@ def cmd_coverage(db, out_file):
     forms_failed_cov = c.execute(
         "SELECT COUNT(*) FROM discovery WHERE source='forms' AND status='failed'").fetchone()[0]
     rep = {
+        "tests_executed": tests_executed,
         "discovery_failed_sources": src_fail_cov,
         "forms_pages_failed": forms_failed_cov,
         "generated": now(),
@@ -3116,7 +3120,7 @@ def cmd_coverage(db, out_file):
         "body_complete": body_open == 0,
         "verification_complete": verification_complete,
         "work_complete": work_complete,
-        "complete": work_complete and verification_complete,
+        "complete": work_complete and verification_complete and tests_executed > 0,
     }
     with open(out_file, "w", encoding="utf-8") as fh:
         json.dump(rep, fh, indent=2, sort_keys=True)
