@@ -333,7 +333,10 @@ run_per_host() {
   echo "[*] per-host mode: $total host(s), $chunk per batch, one run dir reused"
 
   # one httpx pass over the entire list, then only alive hosts get a pipeline
+  ALIVE_PARTIAL=0
   if [ "$CONTINUE" = 1 ] && [ -s "$OUT/.alive-batch.txt" ]; then
+    [ -f "$OUT/.alive-partial" ] && ALIVE_PARTIAL=$(cat "$OUT/.alive-partial" 2>/dev/null || echo 0)
+    case "${ALIVE_PARTIAL:-0}" in ''|*[!0-9]*) ALIVE_PARTIAL=0;; esac
     say "--continue: reusing alive list ($(wc -l < "$OUT/.alive-batch.txt" | tr -d ' ') host(s))"
   else
     echo "[*] alive probe (httpx over $total host(s))"
@@ -353,6 +356,7 @@ run_per_host() {
       ALIVE_PARTIAL=1
       warn "alive probe exited rc=$HRC; host coverage will be marked partial"
     fi
+    printf '%s\n' "$ALIVE_PARTIAL" > "$OUT/.alive-partial" 2>/dev/null || true
   fi
   ALIVE_BATCH=$(num "$(wc -l < "$OUT/.alive-batch.txt" 2>/dev/null || echo 0)")
   echo "[*] alive: $ALIVE_BATCH/$total — only these get a pipeline"
@@ -1030,7 +1034,9 @@ if [ "${PRESEED_ALIVE:-0}" = 1 ] && [ -s "$IN" ]; then
 fi
 
 DISC=$(python3 "$QHELPER" discovery-status "$Q" httpx all 2>/dev/null)
-if [ "$REDISCOVER" = 1 ] || [ "$DISC" != "done" ]; then
+if [ "${PRESEED_ALIVE:-0}" = 1 ]; then
+  : # alive list came from the parent; keep its done/partial verdict
+elif [ "$REDISCOVER" = 1 ] || [ "$DISC" != "done" ]; then
   echo "[*] alive probe (httpx)"
   stage "httpx"
   timeout --foreground "$STEP_TIMEOUT" "$HTTPX_BIN" -l "$OUT/hosts.txt" -silent -threads "$THREADS" \
