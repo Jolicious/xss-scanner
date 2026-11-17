@@ -1919,7 +1919,12 @@ def cmd_body_commit(db, id_file, jsonl_file, rc="0", status_file=""):
                 if st == "ok":
                     c.execute("UPDATE jobs SET state='done' WHERE id=?", (jid,))
                 elif st == "deferred":
-                    c.execute("UPDATE jobs SET state='pending' WHERE id=?", (jid,))
+                    # give a slow target a couple of chances, then park it as
+                    # deferred so this pass ends (promote-jobs revives it next run)
+                    c.execute("UPDATE jobs SET tries=tries+1 WHERE id=?", (jid,))
+                    row = c.execute("SELECT tries FROM jobs WHERE id=?", (jid,)).fetchone()
+                    new_state = "deferred" if row and row[0] >= 2 else "pending"
+                    c.execute("UPDATE jobs SET state=? WHERE id=?", (new_state, jid))
                 else:  # failed request: retry once, then park as failed
                     c.execute("UPDATE jobs SET tries=tries+1 WHERE id=?", (jid,))
                     row = c.execute("SELECT tries FROM jobs WHERE id=?", (jid,)).fetchone()
@@ -2781,7 +2786,7 @@ def cmd_verify_plan(db, max_candidates):
     c = connect(db)
     ensure(c)
     ph = ",".join("?" for _ in MANUAL_TEMPLATES)
-    base = ("SELECT id, url FROM findings WHERE template_id NOT IN (%s)"
+    base = ("SELECT id, url, template_id FROM findings WHERE template_id NOT IN (%s)"
             " AND id NOT IN (SELECT finding_id FROM attempts WHERE finding_id IS NOT NULL)"
             % ph)
     args = list(MANUAL_TEMPLATES)
@@ -2796,11 +2801,14 @@ def cmd_verify_plan(db, max_candidates):
                         " WHERE finding_id IS NOT NULL").fetchone()[0]
     created = 0
     c.execute("BEGIN IMMEDIATE")
-    for fid, cand in cands:
+    for fid, cand, tid in cands:
         sp, _ = split_url(cand)
         if sp is None:
             continue
-        segs = _query_segments(cand)
+        if tid in ("reflected-path-xss", "reflected-xss-executable") or "path" in tid:
+            segs = []          # path-injected finding: never verify a query param
+        else:
+            segs = _query_segments(cand)
         if not segs:
             idx, strategy = _path_target(cand)
             for v in ({0, 2} if strategy == "segment-replace" else {0}):
