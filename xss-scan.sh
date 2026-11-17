@@ -158,6 +158,10 @@ NOTIFY=0; NOTIFY_SUMMARY=0; NOTIFY_LIVE=1; NOTIFY_SENT_ANY=0; NOTIFY_IDS=(); NOT
 NOTIFY_CONFIG="${NOTIFY_CONFIG:-$HOME/.config/notify/provider-config.yaml}"
 JSON_FILE=""
 HDRS=(); COOKIE=""; COOKIE_FILE=""; TOKEN=""; TOKEN_FILE=""
+# TLS: verify by default. --insecure-tls (or XSS_INSECURE_TLS=1) is the only
+# way to turn it off; XSS_CA_BUNDLE adds a private CA without weakening this.
+CURL_TLS=()
+DO_INSECURE_TLS=0
 
 num() { case "${1:-}" in ''|*[!0-9]*) echo 0;; *) echo "$1";; esac; }
 die() { echo "[-] $*" >&2; [ "${SILENT:-0}" = 1 ] && echo "[-] $*" >&3; exit 1; }
@@ -231,6 +235,8 @@ while [ $# -gt 0 ]; do
     --no-notify)      NOTIFY=0; NOTIFY_EXPLICIT=1; shift;;
     --notify-id)      NOTIFY_IDS+=("${2:-}"); NOTIFY_EXPLICIT=1; shift 2;;
     --notify-config)  NOTIFY_CONFIG="${2:-}"; shift 2;;
+    --insecure-tls)   DO_INSECURE_TLS=1; shift;;
+    --no-insecure-tls) DO_INSECURE_TLS=0; shift;;
     --notify-summary) NOTIFY=1; NOTIFY_SUMMARY=1; shift;;
     --notify-live)    NOTIFY=1; NOTIFY_LIVE=1; shift;;
     --no-notify-live) NOTIFY_LIVE=0; shift;;
@@ -241,6 +247,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+[ "${XSS_INSECURE_TLS:-0}" = 1 ] && DO_INSECURE_TLS=1
+[ "$DO_INSECURE_TLS" = 1 ] && CURL_TLS+=(-k)
+[ -n "${XSS_CA_BUNDLE:-}" ] && CURL_TLS+=(--cacert "$XSS_CA_BUNDLE")
 [ -n "$IN" ] || { usage; die "need -i <file>"; }
 [ -f "$IN" ] || die "input not found: $IN"
 [ -d "$TPL_DIR" ] || die "templates dir not found: $TPL_DIR"
@@ -312,7 +321,8 @@ run_per_host() {
   [ "$chunk" -ge 1 ] || chunk=1
   mkdir -p "$hostf" "$parts"
   # the parent exits before the normal auto-notify block, so resolve it here
-  if [ "$NOTIFY" = 0 ] && [ -f "$NOTIFY_CONFIG" ]; then
+  # (an explicit --no-notify must never be overridden by provider discovery)
+  if [ "$NOTIFY_EXPLICIT" = 0 ] && [ "$NOTIFY" = 0 ] && [ -f "$NOTIFY_CONFIG" ]; then
     FIRST_ID=$(grep -oE 'id:[[:space:]]*"?[A-Za-z0-9_.-]+"?' "$NOTIFY_CONFIG" 2>/dev/null \
                | head -1 | sed -E 's/id:[[:space:]]*"?//; s/"$//')
     if [ -n "$FIRST_ID" ]; then
@@ -812,6 +822,7 @@ for raw in sys.argv[1:]:
 print(hashlib.sha256("\n".join(sorted(lines)).encode()).hexdigest())
 PY
 )
+echo "[*] tls: verify=$([ "$DO_INSECURE_TLS" = 1 ] && echo off || echo on) ca=${XSS_CA_BUNDLE:-system}"
 echo "[*] auth: cookie=$([ -n "$COOKIE" ] && echo yes || echo no) token=$([ -n "$TOKEN" ] && echo yes || echo no) headers=${AUTH_HDRS_N:-0} auth_sha=${AUTH_SHA:0:12}"
 
 if [ "$PER_HOST" = 1 ] && [ "${PER_HOST_CHILD:-0}" != "1" ]; then
@@ -1153,9 +1164,9 @@ if [ "$DO_SITEMAP" = 1 ] && [ "$HAVE_CURL" = 1 ]; then
       [ -n "$sh" ] || continue
       : > "$SM_TMP"
       for scheme in https http; do
-        curl -sk --max-time 15 -A "Mozilla/5.0" \
+        curl -s "${CURL_TLS[@]+"${CURL_TLS[@]}"}" --max-time 15 -A "Mozilla/5.0" \
           ${NHDR[@]+"${NHDR[@]}"} "$scheme://$sh/robots.txt" >> "$SM_TMP" 2>/dev/null || true
-        curl -sk --max-time 15 -A "Mozilla/5.0" \
+        curl -s "${CURL_TLS[@]+"${CURL_TLS[@]}"}" --max-time 15 -A "Mozilla/5.0" \
           ${NHDR[@]+"${NHDR[@]}"} "$scheme://$sh/sitemap.xml" >> "$SM_TMP" 2>/dev/null || true
       done
       if [ -s "$SM_TMP" ]; then
@@ -1319,7 +1330,7 @@ args=()
 if [ -s "$hdrfile" ]; then
   while IFS= read -r h; do [ -n "$h" ] && args+=(-H "$h"); done < "$hdrfile"
 fi
-{ printf '#SRC %s\n' "$url"; curl -sk --max-time 20 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0" ${args[@]+"${args[@]}"} "$url"; } \
+{ printf '#SRC %s\n' "$url"; curl -s "${CURL_TLS[@]+"${CURL_TLS[@]}"}" --max-time 20 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0" ${args[@]+"${args[@]}"} "$url"; } \
   > "$outdir/$safe.txt" 2>/dev/null
 echo "$?" >> "$outdir/rc.txt"
 EOS
@@ -1589,7 +1600,7 @@ while :; do
                    | sort -u | head -40)
         for th in $TH_HOSTS; do
           [ -n "$th" ] || continue
-          TH_CODE=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 \
+          TH_CODE=$(curl -s "${CURL_TLS[@]+"${CURL_TLS[@]}"}" -o /dev/null -w '%{http_code}' --max-time 10 \
                       ${NHDR[@]+"${NHDR[@]}"} "https://$th/" 2>/dev/null)
           case "$TH_CODE" in
             429|503)

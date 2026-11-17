@@ -1127,7 +1127,11 @@ def cmd_host_status(db, hosts_file, done_file, log_file="", urls_done_file=""):
                 " LEFT JOIN attempts a ON a.finding_id = f.id"
                 " WHERE a.id IS NULL AND f.template_id NOT IN (%s)"
                 " AND " % ph + REPORTABLE_SQL, list(MANUAL_TEMPLATES)).fetchall()
-        except Exception:
+        except Exception as exc:
+            # cannot prove there is no unplanned work -> block, never assume done
+            print("[-] host-status: unplanned-verification query failed: %r" % (exc,),
+                  file=sys.stderr)
+            blocked.update(scope)
             rows = []
         for (url,) in rows:
             h = _host_key(url)
@@ -1353,6 +1357,8 @@ def cmd_api_reflect(db, out_file, limit="300"):
     seen_ins = set()
     rows = c.execute("SELECT url FROM urls ORDER BY id").fetchall()
     payload = "<script>alert(1)</script>"
+    token = "zx%08x" % secrets.randbelow(1 << 32)
+    tagged = payload + '<span data-zx="%s"></span>' % token
     for (url,) in rows:
         if n >= cap:
             break
@@ -1366,31 +1372,33 @@ def cmd_api_reflect(db, out_file, limit="300"):
             continue
         seen.add(url)
         target = up.urlunsplit((sp.scheme, sp.netloc, sp.path,
-                                up.urlencode([(pairs[0][0], payload)]), sp.fragment))
+                                up.urlencode([(pairs[0][0], tagged)]), sp.fragment))
         n += 1
         res = http_request(target, allowed, "GET")
         if res["error"] or not res["body"]:
             continue
         body = res["body"]
-        hit = payload in body or "alert(1)" in body
+        hit = tagged in body or "alert(1)" in body
         if not hit:
             continue
         ctype = (res["ctype"] or "").split(";")[0] or "?"
         is_html = "html" in ctype.lower()
         if is_html and res["status"] < 500:
-            # text/html with the raw payload echoed -> executable candidate
+            # HTML response: only an executable sink is reportable. An inert echo
+            # (script block, comment, attribute-free data) is recorded separately.
+            ctx = "html" if _executable_reflection(body, tagged) else "non_html"
             key = (sp.netloc.lower(), sp.path, pairs[0][0])
-            if key not in seen_ins:
+            if ctx == "html" and key not in seen_ins:
                 seen_ins.add(key)
                 c.execute("INSERT OR IGNORE INTO findings(template_id,url,param,sig,"
-                          "json,created,config_id,context) VALUES(?,?,?,?,?,?,?,'html')",
+                          "json,created,config_id,context) VALUES(?,?,?,?,?,?,?,?)",
                           ("reflected-api-html", target, pairs[0][0],
                            "api|%s" % pairs[0][0],
                            json.dumps({"template-id": "reflected-api-html",
                                        "matched-at": target,
                                        "param": pairs[0][0],
                                        "type": "http"}),
-                           now(), _config_id(c)))
+                           now(), _config_id(c), ctx))
                 c.commit()
                 lines.append("CANDIDATE (html) %s param=%s status=%s"
                              % (sp.path, pairs[0][0], res["status"]))

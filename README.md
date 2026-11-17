@@ -109,10 +109,26 @@ Without `--per-host` one pipeline covers the whole list.
 --api-reflections               report JSON/text API echoes as information
 --no-forms-post                 skip POST form probing
 --retry-failed                  requeue failures on resume
+--insecure-tls                  disable TLS certificate verification (opt-in)
+--no-notify                     never notify, even if a provider config exists
 ```
+
+TLS is verified by default. `--insecure-tls` (or `XSS_INSECURE_TLS=1`) is the
+only way to turn verification off, and the resolved mode is printed at start
+(`[*] tls: verify=on ...`). A private CA can be added without weakening
+verification: `XSS_CA_BUNDLE=/path/to/ca.pem`.
 
 Per-host mode runs one httpx pass over the whole list first, then only alive
 hosts get a pipeline; dead hosts are skipped.
+
+## Tests
+
+```
+python3 tests/test_host_status.py   # queue completion + reflection classifier
+bash    tests/test_notify.sh        # --no-notify vs provider auto-discovery
+```
+
+Both are self-contained (no browser, no external network).
 
 ## Notification accuracy
 
