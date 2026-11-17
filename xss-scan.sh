@@ -1035,11 +1035,13 @@ for _tool in NUCLEI_BIN HTTPX_BIN; do
   _name=$(printf '%s' "$_tool" | tr 'A-Z' 'a-z' | sed 's/_bin$//')
   _path="${!_tool:-}"
   [ -n "$_path" ] || continue
-  _ver=$("$_path" -version 2>/dev/null | head -1 | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  _ver=$("$_path" -version 2>&1 | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1)
   [ -n "$_ver" ] && python3 "$QHELPER" meta-set "$Q" "ver_$_name" "$_ver" 2>/dev/null || true
 done
-if [ -n "${CHROME_PATH:-}" ]; then
-  _cv=$("$CHROME_PATH" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+_chrome="${CHROME_PATH:-}"
+[ -n "$_chrome" ] || _chrome=$(command -v chromium 2>/dev/null || command -v chromium-browser 2>/dev/null || command -v google-chrome 2>/dev/null || true)
+if [ -n "$_chrome" ]; then
+  _cv=$("$_chrome" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
   [ -n "$_cv" ] && python3 "$QHELPER" meta-set "$Q" ver_chromium "$_cv" 2>/dev/null || true
 fi
 python3 "$QHELPER" meta-set "$Q" jobs_cap "$MAX_JOBS" 2>/dev/null || true
