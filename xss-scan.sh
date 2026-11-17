@@ -375,8 +375,15 @@ run_per_host() {
         fi
       done
     fi
-    if [ "$RECHECK" = 0 ] && [ -f "$OUT/hosts-done.txt" ] \
-       && grep -qxF "$CF_HOST" "$OUT/hosts-done.txt"; then
+    CF_TOTAL=$(wc -l < "$cf" | tr -d ' ')
+    CF_DONE=0
+    if [ -f "$OUT/hosts-done.txt" ]; then
+      while IFS= read -r _ch; do
+        _ch=$(printf '%s' "$_ch" | sed -E 's#^[a-z][a-z0-9+.-]*://##; s#[/?#].*$##')
+        grep -qxF "$_ch" "$OUT/hosts-done.txt" && CF_DONE=$((CF_DONE + 1))
+      done < "$cf"
+    fi
+    if [ "$RECHECK" = 0 ] && [ "$CF_TOTAL" -gt 0 ] && [ "$CF_DONE" -ge "$CF_TOTAL" ]; then
       say "skip (already complete): $CF_HOST"
       rm -f "$cf"
       return 0
@@ -479,6 +486,23 @@ run_per_host() {
   else
     rm -rf "$parts"
   fi
+  export PH_TOTAL="$total"
+  DONEH=$(num "$(wc -l < "$OUT/hosts-done.txt" 2>/dev/null || echo 0)")
+  PH_RC=0
+  if [ "$DONEH" -lt "$total" ]; then
+    PH_RC=3
+    python3 - "$OUT/coverage.json" <<'PY'
+import json, os, sys
+p = sys.argv[1]
+try:
+    d = json.load(open(p))
+except Exception:
+    d = {}
+d["complete"] = False
+d["hosts_expected"] = int(os.environ.get("PH_TOTAL", "0") or 0)
+json.dump(d, open(p, "w"), separators=(",", ":"))
+PY
+  fi
   echo "[*] per-host done: $(wc -l < "$OUT/hosts-done.txt" | tr -d ' ')/$total host(s) complete" >&3
   echo "[*] findings: $(wc -l < "$OUT/results.jsonl" | tr -d ' ')  confirmed: $(wc -l < "$OUT/confirmed.jsonl" | tr -d ' ')" >&3
   DONE_FIND=$(num "$(wc -l < "$OUT/results.jsonl" 2>/dev/null || echo 0)")
@@ -501,7 +525,7 @@ run_per_host() {
     timeout --foreground 120 notify "${nargs[@]}" >>"$OUT/logs/notify.log" 2>&1 \
       && echo "[*] notify: completion sent" >&3 || warn "completion notify failed"
   fi
-  return 0
+  return "${PH_RC:-0}"
 }
 
 # ---------- live notify helper (called after each batch with hits) ----------
@@ -532,6 +556,7 @@ MARKERS = ("<", "alert(", "onerror", "onmouseover", "svg", "script", "javascript
 src, dst, header = sys.argv[1], sys.argv[2], sys.argv[3]
 sent_file = sys.argv[4] if len(sys.argv) > 4 else ""
 SCOPE = (sys.argv[5] if len(sys.argv) > 5 else "conf")
+read_file = sys.argv[6] if len(sys.argv) > 6 else sent_file
 
 def norm(url):
     """(host, path-key). Payload segments are collapsed so the same injected
@@ -580,9 +605,9 @@ def param_of(d, url):
     return str(p)
 
 seen_file = set()
-if sent_file:
+if read_file:
     try:
-        with open(sent_file, encoding="utf-8", errors="replace") as fh:
+        with open(read_file, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 line = line.strip()
                 if line:
@@ -1663,7 +1688,7 @@ while :; do
     if [ "$NOTIFY" = 1 ] && [ "$NOTIFY_LIVE" = 1 ] && [ -s "$BODYJ" ]; then
       if notify_from_jsonl "$BODYJ" "$OUT/.notify-live.txt" \
            "MANUAL POST XSS — not confirmed, verify manually (batch $BIDX)" \
-           "$OUT/.notify-pending.txt" cand \
+           "$OUT/.notify-pending.txt" cand "$OUT/.notify-sent.txt" \
          && notify_file "$OUT/.notify-live.txt" "body batch $BIDX"; then
         cat "$OUT/.notify-pending.txt" >> "$OUT/.notify-sent.txt" 2>/dev/null || true
       fi

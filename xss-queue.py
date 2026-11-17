@@ -1883,6 +1883,9 @@ def cmd_body_commit(db, id_file, jsonl_file, rc="0", status_file=""):
         except OSError:
             statuses = []
     valid = {"ok", "failed", "deferred"}
+    if not status_file:
+        print("[-] body-commit rejected: status file required", file=sys.stderr)
+        return 1
     if status_file:
         # whenever a status file is supplied it must cover every claimed job,
         # regardless of the probe exit code
@@ -2340,6 +2343,22 @@ def _dump_request(req_dir, method, url, headers, data, param):
         return ""
 
 
+def _reflected_with_token(body, token, markers, span=80):
+    """True only when a RAW marker is adjacent to our token.
+
+    Adjacency (<= span chars, either order) rules out a page that contains an
+    unrelated raw marker plus an escaped copy of our input elsewhere.
+    """
+    if not body or not token:
+        return False
+    t = re.escape(token)
+    for m in markers:
+        pat = re.escape(m) + r"[\s\S]{0,%d}" % span + t + "|" + t + r"[\s\S]{0,%d}" % span + re.escape(m)
+        if re.search(pat, body):
+            return True
+    return False
+
+
 def cmd_probe_body(spec_file, out_jsonl, status_file=""):
     """Probe POST/JSON body inputs for reflection, in parallel.
 
@@ -2471,8 +2490,8 @@ def cmd_probe_body(spec_file, out_jsonl, status_file=""):
                         break
                     if "html" not in (res["ctype"] or "").lower():
                         continue
-                    if token not in res["body"]:
-                        continue  # not a reflection of this request
+                    if tagged not in res["body"]:
+                        continue  # only a raw, unmodified reflection counts
                     hit = next((m for m in RAW_MARKERS if m in res["body"]), None)
                     if not hit:
                         continue
@@ -2517,8 +2536,8 @@ def cmd_probe_body(spec_file, out_jsonl, status_file=""):
                     break
                 if "html" not in (res["ctype"] or "").lower():
                     continue
-                if token not in res["body"]:
-                    continue  # static marker in the page, not our reflection
+                if tagged not in res["body"]:
+                    continue  # escaped or static marker, not our raw payload
                 hit = next((m for m in RAW_MARKERS if m in res["body"]), None)
                 if not hit:
                     continue
