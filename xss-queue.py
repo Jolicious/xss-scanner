@@ -331,6 +331,11 @@ def cmd_ingest(db, hosts_file, max_total="0"):
         if (host, port) not in allowed:
             st["out_of_scope"] += 1
             continue
+        # route templates from JS ("/:locale/plp/api/:path*", "/:slug/dp/:id")
+        # are not real URLs: never scan them
+        if ":" in sp.path or "*" in sp.path:
+            st["bad_url"] += 1
+            continue
         if sp.path.lower().endswith((".js", ".mjs")):
             # bundles are not scan targets, but they are endpoint sources
             c.execute("INSERT OR IGNORE INTO jsurls(url) VALUES(?)", (u,))
@@ -1276,6 +1281,7 @@ def cmd_api_reflect(db, out_file, limit="300"):
     c = connect(db)
     ensure(c)
     seen, lines, n = set(), [], 0
+    seen_ins = set()
     rows = c.execute("SELECT url FROM urls ORDER BY id").fetchall()
     payload = "<script>alert(1)</script>"
     for (url,) in rows:
@@ -1301,6 +1307,26 @@ def cmd_api_reflect(db, out_file, limit="300"):
         if not hit:
             continue
         ctype = (res["ctype"] or "").split(";")[0] or "?"
+        is_html = "html" in ctype.lower()
+        if is_html and res["status"] < 500:
+            # text/html with the raw payload echoed -> executable candidate
+            key = (sp.netloc.lower(), sp.path, pairs[0][0])
+            if key not in seen_ins:
+                seen_ins.add(key)
+                c.execute("INSERT OR IGNORE INTO findings(template_id,url,param,sig,"
+                          "json,created,config_id,context) VALUES(?,?,?,?,?,?,?,'html')",
+                          ("reflected-api-html", target, pairs[0][0],
+                           "api|%s" % pairs[0][0],
+                           json.dumps({"template-id": "reflected-api-html",
+                                       "matched-at": target,
+                                       "param": pairs[0][0],
+                                       "type": "http"}),
+                           now(), _config_id(c)))
+                c.commit()
+                lines.append("CANDIDATE (html) %s param=%s status=%s"
+                             % (sp.path, pairs[0][0], res["status"]))
+                lines.append("    %s" % target)
+                continue
         lines.append("REFLECT %s param=%s ctype=%s status=%s"
                      % (sp.path, pairs[0][0], ctype, res["status"]))
         lines.append("    %s" % target)
