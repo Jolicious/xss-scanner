@@ -1088,13 +1088,22 @@ def cmd_host_status(db, hosts_file, done_file, log_file="", urls_done_file=""):
     # discovery that is partial/processing/failed means unvisited endpoints,
     # so the host is not complete even when no URL/job is queued
     blocked = set()
-    for key, status in c.execute("SELECT key,status FROM discovery"):
+    for key, status, source in c.execute("SELECT key,status,source FROM discovery"):
         if status not in ("partial", "processing", "failed"):
             continue
-        h = _host_key(key) if "://" in str(key) else ""
+        k = str(key or "")
+        h = ""
+        if "://" in k:
+            h = _host_key(k)
+        elif k in ("pages", "all"):
+            h = ""
+        elif "/" not in k and "." in k:
+            h = _host_key("http://" + k)      # bare-host sources such as gau
         if h in scope:
             blocked.add(h)
-        elif status in ("partial", "processing") and str(key) in ("pages", "all"):
+        elif not h:
+            # chunk ids and global sources: affected hosts are not derivable,
+            # so stay conservative and block the whole scope
             blocked.update(scope)
     # verification state must use the same eligibility rules as the planner
     try:
@@ -1102,12 +1111,13 @@ def cmd_host_status(db, hosts_file, done_file, log_file="", urls_done_file=""):
     except Exception:
         verify_req = 0
     vpend = {}
-    for url, state in c.execute(
-            "SELECT f.url, a.state FROM attempts a JOIN findings f ON f.id=a.finding_id"
-            " WHERE a.state IN ('pending','running','error') AND " + REPORTABLE_SQL):
-        h = _host_key(url)
-        if h in scope:
-            vpend[h] = vpend.get(h, 0) + 1
+    if verify_req:
+        for url, state in c.execute(
+                "SELECT f.url, a.state FROM attempts a JOIN findings f ON f.id=a.finding_id"
+                " WHERE a.state IN ('pending','running','error') AND " + REPORTABLE_SQL):
+            h = _host_key(url)
+            if h in scope:
+                vpend[h] = vpend.get(h, 0) + 1
     if verify_req:
         # reportable findings that never got an attempt (e.g. --verify-max cap)
         ph = ",".join("?" for _ in MANUAL_TEMPLATES)
