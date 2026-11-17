@@ -2358,7 +2358,18 @@ def _executable_reflection(body, tagged):
                 r"<textarea\b.*?</textarea>", r"<title\b.*?</title>",
                 r"<xmp\b.*?</xmp>", r"<noscript\b.*?</noscript>", r"<style\b.*?</style>"):
         stripped = re.sub(pat, "", stripped, flags=re.I | re.S)
-    return tagged in stripped
+    if tagged in stripped:
+        return True
+    # payload that is itself a script element, or closes one, injects real markup
+    # (but not when it sits inside a JSON data script)
+    low = tagged.lower()
+    if low.startswith("<script") or "</script" in low:
+        no_json = re.sub(r"<script\b[^>]*type=[\"']application/(?:ld\+)?json[\"'][^>]*>.*?</script>",
+                         "", body, flags=re.I | re.S)
+        no_json = re.sub(r"<script\b[^>]*id=[\"']__NEXT_DATA__[\"'][^>]*>.*?</script>",
+                         "", no_json, flags=re.I | re.S)
+        return tagged in no_json
+    return False
 
 
 def _reflected_with_token(body, token, markers, span=80):
