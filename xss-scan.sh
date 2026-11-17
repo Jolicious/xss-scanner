@@ -709,11 +709,6 @@ if [ "$SILENT" = 1 ]; then
   exec >>"$LOGS/run.log" 2>&1
 fi
 
-if [ "$PER_HOST" = 1 ] && [ "${PER_HOST_CHILD:-0}" != "1" ]; then
-  run_per_host
-  exit $?
-fi
-
 
 # ---- per-domain completion tracking ----
 HOSTS_DONE_LAST=""
@@ -818,6 +813,12 @@ print(hashlib.sha256("\n".join(sorted(lines)).encode()).hexdigest())
 PY
 )
 echo "[*] auth: cookie=$([ -n "$COOKIE" ] && echo yes || echo no) token=$([ -n "$TOKEN" ] && echo yes || echo no) headers=${AUTH_HDRS_N:-0} auth_sha=${AUTH_SHA:0:12}"
+
+if [ "$PER_HOST" = 1 ] && [ "${PER_HOST_CHILD:-0}" != "1" ]; then
+  run_per_host
+  exit $?
+fi
+
 
 # ---- 1. normalize input ----
 : > "$OUT/hosts.txt"; : > "$OUT/seed-urls.txt"

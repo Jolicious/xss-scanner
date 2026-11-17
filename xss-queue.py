@@ -350,11 +350,11 @@ def cmd_ingest(db, hosts_file, max_total="0"):
         if "?" not in u:
             st["no_query"] += 1
             room = _jobs_room(c)
-            if room is None or room > 0:
-                c.execute("BEGIN IMMEDIATE")
-                c.execute("INSERT OR IGNORE INTO jobs(kind,target,state)"
-                          " VALUES('path',?,'pending')", (u,))
-                c.execute("COMMIT")
+            jstate = "pending" if (room is None or room > 0) else "deferred"
+            c.execute("BEGIN IMMEDIATE")
+            c.execute("INSERT OR IGNORE INTO jobs(kind,target,state)"
+                      " VALUES('path',?,?)", (u, jstate))
+            c.execute("COMMIT")
             continue
         if u in buffered:
             st["duplicate"] += 1
@@ -1096,6 +1096,16 @@ def cmd_host_status(db, hosts_file, done_file, log_file="", urls_done_file=""):
             blocked.add(h)
         elif status in ("partial", "processing") and str(key) in ("pages", "all"):
             blocked.update(scope)
+    # a host with unfinished verification attempts is not complete
+    vpending = {}
+    for url, state in c.execute(
+            "SELECT f.url, a.state FROM attempts a JOIN findings f ON f.id=a.finding_id"
+            " WHERE a.state IN ('pending','running','error')"):
+        h = _host_key(url)
+        if h in scope:
+            vpending[h] = vpending.get(h, 0) + 1
+    for h, n in vpending.items():
+        pending[h] = pending.get(h, 0) + n
     completed = sorted((h for h in scope if not pending.get(h)
                         and h not in blocked and done.get(h)),
                        key=lambda h: order.get(h, 0))
