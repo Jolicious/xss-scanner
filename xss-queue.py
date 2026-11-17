@@ -714,14 +714,17 @@ def _ctx_survives(allowed, url, tid, markers):
                       "", body, flags=re.I | re.S)
     stripped = re.sub(r"<script[^>]*id=[\"']__NEXT_DATA__[\"'][^>]*>.*?</script>",
                       "", stripped, flags=re.I | re.S)
-    for pat in (r"<!--.*?-->", r"<textarea\b.*?</textarea>", r"<title\b.*?</title>",
+    for pat in (r"<!--.*?-->", r"<template\b[^>]*>.*?</template>",
+                r"<textarea\b.*?</textarea>", r"<title\b.*?</title>",
                 r"<xmp\b.*?</xmp>", r"<noscript\b.*?</noscript>", r"<style\b.*?</style>"):
         stripped = re.sub(pat, "", stripped, flags=re.I | re.S)
-    # payload only inside <script>: executable only with a quote breakout
+    # payload only inside <script>: a quote breakout or an injected </script>
+    # can execute; a plain marker inside a JS string cannot
     no_script = re.sub(r"<script\b.*?</script>", "", stripped, flags=re.I | re.S)
     if any(m in stripped for m in markers) and not any(m in no_script for m in markers):
-        breakout = any(";alert" in m for m in markers) and any(
-            ('"' in m or "'" in m) for m in markers)
+        breakout = (any(";alert" in m for m in markers) and any(
+            ('"' in m or "'" in m) for m in markers)) or any(
+            ("</script" in m.lower() or m.lower().startswith("<script")) for m in markers)
         if not breakout:
             return False, "script_string"
     if any(m in stripped for m in markers):
@@ -3139,7 +3142,8 @@ def cmd_ctxfilter(db, keep="0"):
         stripped = re.sub(r"<script[^>]*id=[\"']__NEXT_DATA__[\"'][^>]*>.*?</script>",
                           "", stripped, flags=re.I | re.S)
         # non-executable containers: payload there cannot run
-        for pat in (r"<!--.*?-->", r"<textarea\b.*?</textarea>", r"<title\b.*?</title>",
+        for pat in (r"<!--.*?-->", r"<template\b[^>]*>.*?</template>",
+                    r"<textarea\b.*?</textarea>", r"<title\b.*?</title>",
                     r"<xmp\b.*?</xmp>", r"<noscript\b.*?</noscript>",
                     r"<style\b.*?</style>"):
             stripped = re.sub(pat, "", stripped, flags=re.I | re.S)
@@ -3147,8 +3151,9 @@ def cmd_ctxfilter(db, keep="0"):
         if hit_html:
             no_script = re.sub(r"<script\b.*?</script>", "", stripped, flags=re.I | re.S)
             if any(m in stripped for m in markers) and not any(m in no_script for m in markers):
-                breakout = any(";alert" in m for m in markers) and any(
-                    ('"' in m or "'" in m) for m in markers)
+                breakout = (any(";alert" in m for m in markers) and any(
+                    ('"' in m or "'" in m) for m in markers)) or any(
+                    ("</script" in m.lower() or m.lower().startswith("<script")) for m in markers)
                 if not breakout:
                     dropped += 1
                     c.execute("UPDATE findings SET context='script_string' WHERE id=?", (fid,))

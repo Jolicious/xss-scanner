@@ -348,7 +348,11 @@ run_per_host() {
     timeout --foreground "${STEP_TIMEOUT:-1800}" "$HTTPX_BIN" "${HA[@]}" \
       -o "$OUT/.alive-batch.txt" 2>>"$OUT/logs/per-host.log"
     HRC=$?
-    [ "$HRC" -ne 0 ] && warn "alive probe exited rc=$HRC (see logs/per-host.log)"
+    ALIVE_PARTIAL=0
+    if [ "$HRC" -ne 0 ]; then
+      ALIVE_PARTIAL=1
+      warn "alive probe exited rc=$HRC; host coverage will be marked partial"
+    fi
   fi
   ALIVE_BATCH=$(num "$(wc -l < "$OUT/.alive-batch.txt" 2>/dev/null || echo 0)")
   echo "[*] alive: $ALIVE_BATCH/$total — only these get a pipeline"
@@ -407,12 +411,12 @@ run_per_host() {
     PTMO="${PER_HOST_TIMEOUT:-0}"
     if [ "$PTMO" -gt 0 ]; then
       timeout --foreground "$PTMO" \
-        env PER_HOST_CHILD=1 FORCE_CONFIG="$CFORCE" PRESEED_ALIVE=1 SEED_FILE="$_cfseeds" bash "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} -i "$cf" -o "$part" \
+        env PER_HOST_CHILD=1 FORCE_CONFIG="$CFORCE" PRESEED_ALIVE=1 ALIVE_PARTIAL="$ALIVE_PARTIAL" SEED_FILE="$_cfseeds" bash "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} -i "$cf" -o "$part" \
         >&3 2>>"$OUT/logs/per-host.log"
       prc=$?
       [ "$prc" -eq 124 ] && warn "per-host: $(tr '\n' ' ' < "$cf") hit ${PTMO}s budget; partial results kept"
     else
-      env PER_HOST_CHILD=1 FORCE_CONFIG="$CFORCE" PRESEED_ALIVE=1 SEED_FILE="$_cfseeds" bash "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} -i "$cf" -o "$part" \
+      env PER_HOST_CHILD=1 FORCE_CONFIG="$CFORCE" PRESEED_ALIVE=1 ALIVE_PARTIAL="$ALIVE_PARTIAL" SEED_FILE="$_cfseeds" bash "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} -i "$cf" -o "$part" \
         >&3 2>>"$OUT/logs/per-host.log"
       prc=$?
     fi
@@ -1015,8 +1019,13 @@ if [ "${PRESEED_ALIVE:-0}" = 1 ] && [ -s "$IN" ]; then
   ALIVE=$(wc -l < "$OUT/alive.txt" | tr -d ' ')
   if [ "${ALIVE:-0}" -gt 0 ]; then
     echo "[*] alive: $ALIVE (pre-seeded by parent, httpx skipped)"
-    python3 "$QHELPER" discovery-set "$Q" httpx all done 0
-    DISC=done
+    if [ "${ALIVE_PARTIAL:-0}" = 1 ]; then
+      python3 "$QHELPER" discovery-set "$Q" httpx all partial 1
+      DISC=partial
+    else
+      python3 "$QHELPER" discovery-set "$Q" httpx all done 0
+      DISC=done
+    fi
   fi
 fi
 
