@@ -3407,6 +3407,19 @@ def cmd_why(db):
     for k, v in (d.get("discovery") or {}).items():
         if k in ("partial", "processing") and v:
             reasons.append("discovery %s=%s" % (k, v))
+    try:
+        cw = connect(db)
+        for src, st, n in cw.execute(
+                "SELECT source,status,COUNT(*) FROM discovery"
+                " WHERE status IN ('partial','processing')"
+                " GROUP BY source,status ORDER BY 3 DESC"):
+            reasons.append("  %s %s=%s" % (src, st, n))
+        for src, key, st in cw.execute(
+                "SELECT source,substr(key,1,60),status FROM discovery"
+                " WHERE status IN ('partial','processing') LIMIT 3"):
+            reasons.append("    e.g. %s/%s=%s" % (src, key, st))
+    except Exception:
+        pass
     for k in ("pending", "inflight", "failed", "deferred"):
         v = (d.get("urls") or {}).get(k, 0)
         if v:
@@ -3628,9 +3641,12 @@ def _dispatch(argv):
         u = c.execute("UPDATE urls SET state='pending' WHERE state='inflight'")
         j = c.execute("UPDATE jobs SET state='pending' WHERE state='running'")
         a = c.execute("UPDATE attempts SET state='pending' WHERE state='running'")
+        # a killed process leaves discovery rows in 'processing' forever, which
+        # blocks completion; make them retryable again
+        d = c.execute("UPDATE discovery SET status='partial' WHERE status='processing'")
         c.execute("COMMIT")
-        print("[*] reset: %d url(s), %d job(s), %d attempt(s)"
-              % (u.rowcount, j.rowcount, a.rowcount), file=sys.stderr)
+        print("[*] reset: %d url(s), %d job(s), %d attempt(s), %d discovery"
+              % (u.rowcount, j.rowcount, a.rowcount, d.rowcount), file=sys.stderr)
         return 0
     if cmd == "abort-batch":
         _mark_urls(args[0], args[1], "failed", bump=True)

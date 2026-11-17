@@ -72,7 +72,7 @@ ORIG_ARGS=("$@")
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # go-installed tools (gau, katana, httpx, nuclei) live in ~/go/bin and are
 # usually absent from non-interactive PATH (cron, systemd, CI)
-export PATH="$HOME/go/bin:/usr/local/bin:$PATH"
+export PATH="$HOME/go/bin:/usr/local/bin:/opt/bugbounty-tools:$PATH"
 
 # ---- portable shims: macOS/BSD lacks several GNU tools this script uses ----
 if ! command -v timeout >/dev/null 2>&1; then
@@ -270,11 +270,16 @@ done
 command -v python3 >/dev/null 2>&1 || die "missing python3"
 
 pick_bin() {
-  local want="$2" c
+  local want="$2" c ver
   if [ -n "${1:-}" ]; then printf '%s' "$1"; return 0; fi
-  for c in "$HOME/go/bin/$want" "$(command -v "$want" 2>/dev/null || true)" /usr/local/bin/"$want" /usr/bin/"$want"; do
+  for c in "$HOME/go/bin/$want" "$(command -v "$want" 2>/dev/null || true)" \
+           /usr/local/bin/"$want" /usr/bin/"$want" \
+           /opt/bugbounty-tools/"$want" /opt/"$want"/"$want"; do
     [ -n "$c" ] && [ -x "$c" ] || continue
-    if "$c" -version 2>&1 | grep -qiE 'projectdiscovery|nuclei engine'; then
+    ver=$("$c" -version 2>&1 | head -20)
+    # projectdiscovery banners are suppressed on non-tty, so also accept the
+    # version line itself; pip httpx fails -version entirely and is rejected
+    if printf '%s' "$ver" | grep -qiE 'projectdiscovery|nuclei engine|current version|httpx version'; then
       printf '%s' "$c"; return 0
     fi
   done
@@ -1333,8 +1338,29 @@ if [ "$DO_CRAWL" = 1 ] && { [ "$REDISCOVER" = 1 ] || [ "$DISC" != "done" ]; }; t
   if [ "${#LEFT[@]}" -eq 0 ]; then
     python3 "$QHELPER" discovery-set "$Q" katana pages done 0
   else
-    warn "${#LEFT[@]} crawl chunk(s) still pending; re-run with -o $OUT to continue"
-    python3 "$QHELPER" discovery-set "$Q" katana pages partial 0
+    mkdir -p "$OUT/.crawl-tries"
+    _stuck=0
+    for _ck in "${LEFT[@]}"; do
+      _cn=$(basename "$_ck")
+      _tf="$OUT/.crawl-tries/$_cn"
+      _tn=$(cat "$_tf" 2>/dev/null || echo 0)
+      case "${_tn:-0}" in ''|*[!0-9]*) _tn=0;; esac
+      _tn=$((_tn + 1))
+      printf '%s\n' "$_tn" > "$_tf"
+      if [ "$_tn" -ge 2 ]; then
+        # host keeps stalling this chunk: mark it terminal instead of leaving
+        # the whole run partial forever
+        python3 "$QHELPER" discovery-set "$Q" katana "$_cn" failed 2 2>/dev/null || true
+        rm -f "$_ck"
+        _stuck=$((_stuck + 1))
+      fi
+    done
+    if [ "${#LEFT[@]}" -gt 0 ]; then
+      warn "${#LEFT[@]} crawl chunk(s) still pending ($_stuck parked after 2 tries); re-run -o $OUT to continue"
+      python3 "$QHELPER" discovery-set "$Q" katana pages partial 0
+    else
+      python3 "$QHELPER" discovery-set "$Q" katana pages failed 2
+    fi
   fi
 fi
 
@@ -1367,7 +1393,9 @@ if [ -s "$hdrfile" ]; then
 fi
 { printf '#SRC %s\n' "$url"; curl -s "${CURL_TLS[@]+"${CURL_TLS[@]}"}" --max-time 20 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0" ${args[@]+"${args[@]}"} "$url"; } \
   > "$outdir/$safe.txt" 2>/dev/null
-echo "$?" >> "$outdir/rc.txt"
+rc=$?
+echo "$rc" >> "$outdir/rc.txt"
+printf '%s\n' "$rc" > "$outdir/$safe.rc"
 EOS
     chmod +x "$OUT/.js-fetch.sh"
     JROUND=0
@@ -1390,7 +1418,28 @@ EOS
       echo "[*] js mining round $JROUND: $NEWN new bundle(s), conc=$JS_CONC"
   stage "js"
       xargs -P "$JS_CONC" -I{} bash "$OUT/.js-fetch.sh" "$OUT/.js-dl" {} "$OUT/.js-hdrs.txt" < "$OUT/.js-urls.txt"
-      cat "$OUT/.js-urls.txt" >> "$OUT/.js-done.txt"
+      # failed bundles must stay out of js-done or they are never retried and
+      # 'js/pages' stays partial forever. Two attempts, then park as skipped.
+      : > "$OUT/.js-retry.tmp"
+      while IFS= read -r _ju; do
+        [ -n "$_ju" ] || continue
+        _safe=$(printf '%s' "$_ju" | sha1sum | cut -c1-16)
+        _rc=$(cat "$OUT/.js-dl/$_safe.rc" 2>/dev/null || echo 1)
+        if [ "$_rc" = 0 ] && [ -s "$OUT/.js-dl/$_safe.txt" ]; then
+          printf '%s\n' "$_ju" >> "$OUT/.js-done.txt"
+        else
+          _n=$(grep -cF "$_ju" "$OUT/.js-retries" 2>/dev/null || echo 0)
+          printf '%s\n' "$_ju" >> "$OUT/.js-retries"
+          if [ "${_n:-0}" -ge 1 ]; then
+            printf '%s\n' "$_ju" >> "$OUT/.js-done.txt"
+            printf '%s\n' "$_ju" >> "$OUT/.js-skipped"
+          else
+            printf '%s\n' "$_ju" >> "$OUT/.js-retry.tmp"
+          fi
+        fi
+      done < "$OUT/.js-urls.txt"
+      JSRETRY=$(wc -l < "$OUT/.js-retry.tmp" | tr -d ' ')
+      rm -f "$OUT/.js-retry.tmp"
       python3 "$QHELPER" js-extract "$OUT/.js-dl" "$MAX_JS_URLS" > "$URLTMP" 2>>"$LOGS/js.log"
       JRC=$?
       if [ -s "$URLTMP" ]; then ingest < "$URLTMP" 2>>"$LOGS/js.log" || true; fi
@@ -1442,10 +1491,7 @@ EOS
       : > "$URLTMP"
     fi
 
-    JSFAIL=0
-    if [ -f "$OUT/.js-dl/rc.txt" ]; then
-      JSFAIL=$(grep -cE '^[1-9]' "$OUT/.js-dl/rc.txt" 2>/dev/null || echo 0)
-    fi
+    JSFAIL="${JSRETRY:-0}"
     case "${JSFAIL:-0}" in ''|*[!0-9]*) JSFAIL=0;; esac
     if [ "$JSFAIL" -gt 0 ]; then
       warn "js mining: ${JSFAIL} bundle download(s) failed; stage marked partial"
