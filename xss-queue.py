@@ -2351,13 +2351,11 @@ def _executable_reflection(body, tagged):
     """
     if not body or not tagged:
         return False
-    stripped = re.sub(r"<script[^>]*type=[\"']application/(?:ld\+)?json[\"'][^>]*>.*?</script>",
-                      "", body, flags=re.I | re.S)
-    stripped = re.sub(r"<script[^>]*id=[\"']__NEXT_DATA__[\"'][^>]*>.*?</script>",
-                      "", stripped, flags=re.I | re.S)
-    # note: HTML comments are not stripped here - the per-attempt token lives in
-    # <!--...--> and stripping it would hide a genuine reflection
-    for pat in (r"<textarea\b.*?</textarea>", r"<title\b.*?</title>",
+    stripped = body
+    # script blocks (JSON data, JS strings) never prove element injection
+    stripped = re.sub(r"<script\b[^>]*>.*?</script>", "", stripped, flags=re.I | re.S)
+    for pat in (r"<!--.*?-->", r"<template\b[^>]*>.*?</template>",
+                r"<textarea\b.*?</textarea>", r"<title\b.*?</title>",
                 r"<xmp\b.*?</xmp>", r"<noscript\b.*?</noscript>", r"<style\b.*?</style>"):
         stripped = re.sub(pat, "", stripped, flags=re.I | re.S)
     return tagged in stripped
@@ -2497,7 +2495,7 @@ def cmd_probe_body(spec_file, out_jsonl, status_file=""):
                     if overdue():
                         return recs, st, False
                     token = "zx%08x" % secrets.randbelow(1 << 32)
-                    tagged = payload + "<!--" + token + "-->"
+                    tagged = payload + '<span data-zx="%s"></span>' % token
                     trial = json.loads(json.dumps(base_json))
                     _set_json_path(trial, path, tagged)
                     data = json.dumps(trial).encode()
@@ -2535,7 +2533,7 @@ def cmd_probe_body(spec_file, out_jsonl, status_file=""):
                 if overdue():
                     return recs, st, False
                 token = "zx%08x" % secrets.randbelow(1 << 32)
-                tagged = payload + "<!--" + token + "-->"
+                tagged = payload + '<span data-zx="%s"></span>' % token
                 trial = [list(p) for p in pairs]
                 trial[idx][1] = tagged
                 kv = [tuple(p) for p in trial]
