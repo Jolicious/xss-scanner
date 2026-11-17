@@ -290,6 +290,10 @@ HAVE_JQ=0;     command -v jq     >/dev/null 2>&1 && HAVE_JQ=1
 [ "$HAVE_GAU" = 1 ] || DO_GAU=0
 [ "$HAVE_CURL" = 1 ] || DO_JS=0
 [ "$DO_GAU" = 1 ] || [ "$SILENT" = 1 ] || warn "gau disabled/unavailable - seed + crawl URLs only"
+if [ "$NOTIFY" = 1 ] && ! command -v notify >/dev/null 2>&1; then
+  warn "notify requested but binary not found on PATH (looked for 'notify'); notifications will be skipped"
+  NOTIFY=0
+fi
 if [ "$DO_CRAWL" = 1 ] && [ "$HAVE_KATANA" = 0 ]; then
   warn "katana not found - crawl skipped"; DO_CRAWL=0
 fi
@@ -451,6 +455,9 @@ run_per_host() {
           rm -rf "$part"
         else
           say "kept unfinished state for $CF_HOST (resume with --continue)"
+          # name the counters that keep this host incomplete instead of just
+          # "partial" with no reason
+          python3 "$QHELPER" why "$part/queue.db" 2>/dev/null | sed 's/^/    /' >&3 || true
         fi
       else
         mkdir -p "$OUT/.failed-parts"
@@ -1391,7 +1398,7 @@ EOS
     done
     # record what discovery actually covered versus what it was allowed to cover
     JSD=$( [ -f "$OUT/.js-all.txt" ] && wc -l < "$OUT/.js-all.txt" | tr -d ' ' || echo 0)
-    JSP=$( [ -f "$OUT/.js-done.txt" ] && wc -l < "$OUT/.js-done.txt" | tr -d ' ' || echo 0)
+    JSP=$( [ -f "$OUT/.js-done.txt" ] && sort -u "$OUT/.js-done.txt" | wc -l | tr -d ' ' || echo 0)
     case "${JSD:-0}" in ''|*[!0-9]*) JSD=0;; esac
     case "${JSP:-0}" in ''|*[!0-9]*) JSP=0;; esac
     python3 "$QHELPER" meta-set "$Q" js_discovered "$JSD" 2>/dev/null || true

@@ -3355,6 +3355,59 @@ def cmd_ctxfilter(db, keep="0"):
     return 0
 
 
+def cmd_why(db):
+    """Print the counters that keep a host from being complete."""
+    import tempfile as _tf
+    fd, tmp = _tf.mkstemp(suffix=".json")
+    os.close(fd)
+    try:
+        cmd_coverage(db, tmp)
+        with open(tmp, encoding="utf-8") as fh:
+            d = json.load(fh)
+    except Exception as exc:
+        print("[-] why: %r" % (exc,), file=sys.stderr)
+        return 1
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    reasons = []
+    if d.get("discovery_failed_sources"):
+        reasons.append("discovery failed sources=%s" % d["discovery_failed_sources"])
+    for k, v in (d.get("discovery") or {}).items():
+        if k in ("partial", "processing") and v:
+            reasons.append("discovery %s=%s" % (k, v))
+    for k in ("pending", "inflight", "failed", "deferred"):
+        v = (d.get("urls") or {}).get(k, 0)
+        if v:
+            reasons.append("urls %s=%s" % (k, v))
+    for kind in ("path_jobs", "body_jobs"):
+        for k in ("pending", "running", "failed"):
+            v = (d.get(kind) or {}).get(k, 0)
+            if v:
+                reasons.append("%s %s=%s" % (kind, k, v))
+    if d.get("jobs_capped"):
+        reasons.append("jobs_capped=%s" % d["jobs_capped"])
+    if d.get("verification_requested"):
+        for k in ("pending", "running", "error"):
+            v = (d.get("attempts") or {}).get(k, 0)
+            if v:
+                reasons.append("attempts %s=%s" % (k, v))
+        if d.get("verification_capped"):
+            reasons.append("verification_capped=%s" % d["verification_capped"])
+        if d.get("verification_unplanned"):
+            reasons.append("verification_unplanned=%s" % d["verification_unplanned"])
+    if d.get("verification_batch_errors"):
+        reasons.append("verification_batch_errors=%s" % d["verification_batch_errors"])
+    if not d.get("tests_executed"):
+        reasons.append("no tests executed")
+    if not d.get("detection_batches"):
+        reasons.append("no detection batch recorded")
+    print("blocked by: " + ("; ".join(reasons) if reasons else "nothing obvious"))
+    return 0
+
+
 def cmd_coverage(db, out_file):
     c = connect(db)
     ensure(c)
@@ -3519,7 +3572,7 @@ def _dispatch(argv):
         "merge-run": cmd_merge_run,
         "js-extract": cmd_js_extract, "inline-scripts": cmd_inline_scripts,
         "path-abort": cmd_path_abort, "body-batch": cmd_body_batch,
-        "body-skip": cmd_body_skip,
+        "body-skip": cmd_body_skip, "why": cmd_why,
         "body-abort": cmd_body_abort, "export": cmd_export, "stats": cmd_stats,
         "coverage": cmd_coverage, "ctxfilter": cmd_ctxfilter, "verify-plan": cmd_verify_plan,
         "verify-report": cmd_verify_report,
