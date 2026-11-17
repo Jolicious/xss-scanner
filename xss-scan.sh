@@ -500,9 +500,10 @@ notify_file() { # $1 = message file, $2 = label
   if timeout --foreground 120 notify "${args[@]}" >>"$LOGS/notify.log" 2>&1; then
     NOTIFY_SENT_ANY=1
     echo "[*] notify: sent $2"
-  else
-    warn "notify send failed for $2 (see logs/notify.log)"
+    return 0
   fi
+  warn "notify send failed for $2 (see logs/notify.log)"
+  return 1
 }
 
 # build a readable message from a nuclei-style jsonl batch

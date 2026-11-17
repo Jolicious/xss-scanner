@@ -988,6 +988,7 @@ def cmd_merge_run(child_dir, parent_dir):
             pass
     else:
         complete = False
+    complete = bool(parts) and all(bool(v.get("complete")) for v in parts.values())
     hosts_done = 0
     try:
         with open(os.path.join(parent_dir, "hosts-done.txt"), encoding="utf-8") as fh:
@@ -3165,7 +3166,7 @@ def _dispatch(argv):
         "form-plan": cmd_form_plan, "json-plan": cmd_json_plan,
     }
     if cmd in plain:
-        plain[cmd](*args)
+        return plain[cmd](*args)
         return 0
     if cmd in rc_cmds:
         return rc_cmds[cmd](*args)
