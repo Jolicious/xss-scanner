@@ -2457,8 +2457,10 @@ def cmd_probe_body(spec_file, out_jsonl, status_file=""):
                 for payload in BODY_PAYLOADS[:pmax]:
                     if overdue():
                         return recs, st, False
+                    token = "zx%08x" % secrets.randbelow(1 << 32)
+                    tagged = payload + "<!--" + token + "-->"
                     trial = json.loads(json.dumps(base_json))
-                    _set_json_path(trial, path, payload)
+                    _set_json_path(trial, path, tagged)
                     data = json.dumps(trial).encode()
                     res = http_request(url, allowed, method, data, "application/json")
                     if res["error"]:
@@ -2469,10 +2471,12 @@ def cmd_probe_body(spec_file, out_jsonl, status_file=""):
                         break
                     if "html" not in (res["ctype"] or "").lower():
                         continue
+                    if token not in res["body"]:
+                        continue  # not a reflection of this request
                     hit = next((m for m in RAW_MARKERS if m in res["body"]), None)
                     if not hit:
                         continue
-                    rec = make_rec(spec, url, ".".join(map(str, path)), li, payload, hit)
+                    rec = make_rec(spec, url, ".".join(map(str, path)), li, tagged, hit)
                     rec["request_file"] = _dump_request(
                         req_dir, method, url, {"Content-Type": "application/json"},
                         data, ".".join(map(str, path)))
@@ -2491,8 +2495,10 @@ def cmd_probe_body(spec_file, out_jsonl, status_file=""):
             for payload in payloads:
                 if overdue():
                     return recs, st, False
+                token = "zx%08x" % secrets.randbelow(1 << 32)
+                tagged = payload + "<!--" + token + "-->"
                 trial = [list(p) for p in pairs]
-                trial[idx][1] = payload
+                trial[idx][1] = tagged
                 kv = [tuple(p) for p in trial]
                 if method.upper() == "GET":
                     req_url = url + ("&" if "?" in url else "?") + \
@@ -2511,10 +2517,12 @@ def cmd_probe_body(spec_file, out_jsonl, status_file=""):
                     break
                 if "html" not in (res["ctype"] or "").lower():
                     continue
+                if token not in res["body"]:
+                    continue  # static marker in the page, not our reflection
                 hit = next((m for m in RAW_MARKERS if m in res["body"]), None)
                 if not hit:
                     continue
-                rec = make_rec(spec, url, pairs[idx][0], idx, payload, hit)
+                rec = make_rec(spec, url, pairs[idx][0], idx, tagged, hit)
                 rec["request_file"] = _dump_request(
                     req_dir, method, req_url,
                     {"Content-Type": ctype} if ctype else {}, data, pairs[idx][0])

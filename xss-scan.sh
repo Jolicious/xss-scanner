@@ -457,10 +457,12 @@ run_per_host() {
     done
     _cfseeds="$cf.seeds"
     : > "$_cfseeds"
+    _cfhosts="$cf.hosts"
+    sed -E 's#^[a-z][a-z0-9+.-]*://##; s#[/?#].*$##' "$cf" | sort -u > "$_cfhosts"
     while IFS= read -r _u; do
       case "$_u" in http://*|https://*) ;; *) continue;; esac
       _uh=$(printf '%s' "$_u" | sed -E 's#^[a-z][a-z0-9+.-]*://##; s#[/?#].*$##')
-      grep -qxF "$_uh" "$cf" && printf '%s\n' "$_u" >> "$_cfseeds"
+      grep -qxF "$_uh" "$_cfhosts" && printf '%s\n' "$_u" >> "$_cfseeds"
     done < "$IN"
     ph_one "$cf" &
     WPIDS+=("$!")
