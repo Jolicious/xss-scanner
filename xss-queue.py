@@ -2801,8 +2801,10 @@ def cmd_verify_plan(db, max_candidates):
     cands = c.execute(q, args).fetchall()
     total = c.execute(("SELECT COUNT(*) FROM findings WHERE template_id NOT IN (%s)"
                        " AND " % ph) + REPORTABLE_SQL, list(MANUAL_TEMPLATES)).fetchone()[0]
-    already = c.execute("SELECT COUNT(DISTINCT finding_id) FROM attempts"
-                        " WHERE finding_id IS NOT NULL").fetchone()[0]
+    already = c.execute(
+        "SELECT COUNT(DISTINCT a.finding_id) FROM attempts a"
+        " JOIN findings f ON f.id = a.finding_id"
+        " WHERE a.finding_id IS NOT NULL AND " + REPORTABLE_SQL).fetchone()[0]
     created = 0
     c.execute("BEGIN IMMEDIATE")
     for fid, cand, tid in cands:
@@ -3225,10 +3227,11 @@ def cmd_coverage(db, out_file):
     att_err = att.get("error", 0)
     ph_manual = ",".join("'%s'" % t for t in MANUAL_TEMPLATES)
     eligible = c.execute(("SELECT COUNT(*) FROM findings WHERE template_id NOT IN (%s)"
-                          " AND " % ph_manual) + REPORTABLE_SQL,
-                         list(MANUAL_TEMPLATES)).fetchone()[0]
-    planned = c.execute("SELECT COUNT(DISTINCT finding_id) FROM attempts"
-                        " WHERE finding_id IS NOT NULL").fetchone()[0]
+                          " AND " % ph_manual) + REPORTABLE_SQL).fetchone()[0]
+    planned = c.execute(
+        "SELECT COUNT(DISTINCT a.finding_id) FROM attempts a"
+        " JOIN findings f ON f.id = a.finding_id"
+        " WHERE a.finding_id IS NOT NULL AND " + REPORTABLE_SQL).fetchone()[0]
     unplanned = max(0, eligible - planned)
     # 'failed' is terminal: the source was retried and parked. Only work that
     # can still make progress (pending/partial/running) blocks completion.
