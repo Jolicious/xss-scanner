@@ -63,6 +63,9 @@ RAW_MARKERS = ("<svg onload=", "<svg/onload=", "<img src=x onerror=",
 API_PARAMS = ("limit", "page", "start", "end", "from", "to", "offset",
               "size", "count", "id", "q", "query", "term", "search",
               "sort", "filter", "name", "email", "user")
+NON_REPORTABLE = ("json_data", "gone", "non_html", "escaped", "blocked", "script_string")
+REPORTABLE_SQL = ("COALESCE(context,'') NOT IN (%s)"
+                  % ",".join("'%s'" % c for c in NON_REPORTABLE))
 MANUAL_TEMPLATES = ("reflected-body-xss",)
 COMMON_PARAMS = ["p", "q", "id", "page", "site", "url", "file", "name",
                  "search", "query", "level", "product", "version"]
@@ -2787,16 +2790,17 @@ def cmd_verify_plan(db, max_candidates):
     ensure(c)
     ph = ",".join("?" for _ in MANUAL_TEMPLATES)
     base = ("SELECT id, url, template_id FROM findings WHERE template_id NOT IN (%s)"
-            " AND id NOT IN (SELECT finding_id FROM attempts WHERE finding_id IS NOT NULL)"
-            % ph)
+            " AND " + REPORTABLE_SQL +
+            " AND id NOT IN (SELECT finding_id FROM attempts WHERE finding_id IS NOT NULL)")
+    base = base % ph
     args = list(MANUAL_TEMPLATES)
     q = base + " ORDER BY id"
     if max_candidates:
         q += " LIMIT ?"
         args.append(max_candidates)
     cands = c.execute(q, args).fetchall()
-    total = c.execute("SELECT COUNT(*) FROM findings WHERE template_id NOT IN (%s)"
-                      % ph, list(MANUAL_TEMPLATES)).fetchone()[0]
+    total = c.execute(("SELECT COUNT(*) FROM findings WHERE template_id NOT IN (%s)"
+                       " AND " % ph) + REPORTABLE_SQL, list(MANUAL_TEMPLATES)).fetchone()[0]
     already = c.execute("SELECT COUNT(DISTINCT finding_id) FROM attempts"
                         " WHERE finding_id IS NOT NULL").fetchone()[0]
     created = 0
@@ -3074,10 +3078,7 @@ def cmd_export(db, out_file):
     n = 0
     with open(tmp, "w", encoding="utf-8") as fh:
         for (blob,) in c.execute(
-                "SELECT json FROM findings"
-                " WHERE COALESCE(context,'') NOT IN"
-                " ('json_data','gone','non_html','escaped','blocked','script_string')"
-                " ORDER BY id"):
+                "SELECT json FROM findings WHERE " + REPORTABLE_SQL + " ORDER BY id"):
             fh.write(blob + "\n")
             n += 1
     os.replace(tmp, out_file)
@@ -3223,8 +3224,9 @@ def cmd_coverage(db, out_file):
     att_open = att.get("pending", 0) + att.get("running", 0)
     att_err = att.get("error", 0)
     ph_manual = ",".join("'%s'" % t for t in MANUAL_TEMPLATES)
-    eligible = c.execute("SELECT COUNT(*) FROM findings WHERE template_id NOT IN (%s)"
-                         % ph_manual).fetchone()[0]
+    eligible = c.execute(("SELECT COUNT(*) FROM findings WHERE template_id NOT IN (%s)"
+                          " AND " % ph_manual) + REPORTABLE_SQL,
+                         list(MANUAL_TEMPLATES)).fetchone()[0]
     planned = c.execute("SELECT COUNT(DISTINCT finding_id) FROM attempts"
                         " WHERE finding_id IS NOT NULL").fetchone()[0]
     unplanned = max(0, eligible - planned)
