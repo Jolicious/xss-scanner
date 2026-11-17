@@ -95,7 +95,7 @@ Without `--per-host` one pipeline covers the whole list.
 | per-host rate / concurrency | 10 rps / 3 |
 | scan rate after crawl | 25 rps |
 | crawl | depth 3, 900s budget, retries + link harvest when damped |
-| POST forms | **enabled** (disable with `--no-forms-post`) |
+| POST forms | **disabled** (opt in with `--forms-post`) |
 | body probing | parallel, 3600s budget |
 | verification | on when a browser is present |
 | notify | on when `~/.config/notify/provider-config.yaml` exists |
@@ -107,7 +107,7 @@ Without `--per-host` one pipeline covers the whole list.
 --cookie-file PATH              cookie from file (handles quotes/CRLF)
 --verify / --no-verify          headless execution proof
 --api-reflections               report JSON/text API echoes as information
---no-forms-post                 skip POST form probing
+--forms-post                    enable POST/JSON body probing (state-changing)
 --retry-failed                  requeue failures on resume
 --insecure-tls                  disable TLS certificate verification (opt-in)
 --no-notify                     never notify, even if a provider config exists
@@ -124,11 +124,35 @@ hosts get a pipeline; dead hosts are skipped.
 ## Tests
 
 ```
+bash tests/run.sh                   # full local release gate
 python3 tests/test_host_status.py   # queue completion + reflection classifier
 bash    tests/test_notify.sh        # --no-notify vs provider auto-discovery
+bash    tests/test_resume.sh        # SIGTERM mid-scan + --continue recovery
+python3 tests/fixture_suite.py      # real nuclei + chromium execution proof
 ```
 
-Both are self-contained (no browser, no external network).
+`fixture_suite.py` starts the fixture server, injects a token-bearing payload
+into executable and inert contexts, and asserts that only real browser
+execution produces an `exec-proof` extractor hit. It also checks that a
+redirect to an out-of-scope host never reaches the browser and that a wrong
+extractor name cannot confirm an attempt. Exit code 77 means nuclei/chromium
+were not found (skipped).
+
+`run.sh` is what CI runs (`.github/workflows/ci.yml`), with pinned
+nuclei/httpx versions.
+
+## Coverage fields
+
+`coverage.json` reports the declared plan, not "everything was tested":
+
+- `discovery_caps` — JS bundle/extraction caps, discovered vs processed bundles,
+  crawl rounds, URL/job caps
+- `body_params_tested` / `body_params_by_outcome` — per-parameter body-probe
+  ledger (`{method, endpoint, parameter, payload family, outcome}`)
+- `tool_versions` — nuclei/httpx/katana/chromium versions used for the run
+- `body_probing_requested` — whether POST/JSON probing was authorized
+
+Tested with: nuclei 3.11.1, httpx 1.9.0, Chromium 150.
 
 ## Notification accuracy
 

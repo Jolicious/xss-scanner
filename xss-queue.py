@@ -111,6 +111,10 @@ SCHEMA = [
         template_id TEXT, param TEXT, first_seen TEXT, last_seen TEXT, hits INTEGER DEFAULT 1,
         evidence TEXT NOT NULL DEFAULT '', PRIMARY KEY(finding_id, config_id))""",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_attempts_token ON attempts(token)",
+    """CREATE TABLE IF NOT EXISTS body_results(
+        id INTEGER PRIMARY KEY, url TEXT NOT NULL, method TEXT NOT NULL,
+        param TEXT NOT NULL, variant INTEGER, outcome TEXT NOT NULL, ts TEXT)""",
+    "CREATE INDEX IF NOT EXISTS idx_body_results_url ON body_results(url)",
     "CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)",
 ]
 
@@ -1902,6 +1906,33 @@ def cmd_body_batch(db, n, out_file):
     _claim(db, ["form", "json"], n, out_file)
 
 
+def cmd_body_skip(db):
+    """Close owed body jobs when POST probing was not authorized.
+
+    State-changing POST/JSON injection is opt-in, so a default run must record
+    these targets as skipped (not pending) or coverage can never complete.
+    """
+    c = connect(db)
+    ensure(c)
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        n = c.execute("SELECT COUNT(*) FROM jobs WHERE kind IN ('form','json')"
+                      " AND state IN ('pending','deferred','failed')").fetchone()[0]
+        c.execute("UPDATE jobs SET state='skipped' WHERE kind IN ('form','json')"
+                  " AND state IN ('pending','deferred','failed')")
+        c.execute("COMMIT")
+    except Exception as exc:
+        try:
+            c.execute("ROLLBACK")
+        except Exception:
+            pass
+        print("[-] body-skip failed: %s" % exc, file=sys.stderr)
+        return 1
+    print("[*] body-skip: %d target(s) skipped (POST probing disabled)" % n,
+          file=sys.stderr)
+    return 0
+
+
 def cmd_path_commit(db, id_file, jsonl_file):
     c = connect(db)
     ensure(c)
@@ -1927,7 +1958,7 @@ def cmd_path_commit(db, id_file, jsonl_file):
     return 0
 
 
-def cmd_body_commit(db, id_file, jsonl_file, rc="0", status_file=""):
+def cmd_body_commit(db, id_file, jsonl_file, rc="0", status_file="", ledger_file=""):
     c = connect(db)
     ensure(c)
     ids = _ids(id_file)
@@ -1963,9 +1994,27 @@ def cmd_body_commit(db, id_file, jsonl_file, rc="0", status_file=""):
     except OutputError as exc:
         print("[-] body-commit rejected: %s" % exc, file=sys.stderr)
         return 1
+    ledger = []
+    lf = ledger_file or (jsonl_file + ".ledger")
+    if lf and os.path.exists(lf):
+        try:
+            with open(lf, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        ledger.append(json.loads(line))
+        except (OSError, ValueError):
+            ledger = []
     try:
         c.execute("BEGIN IMMEDIATE")
         added = _insert_findings(c, rows, _config_id(c))
+        if ledger:
+            c.executemany(
+                "INSERT INTO body_results(url,method,param,variant,outcome,ts)"
+                " VALUES(?,?,?,?,?,?)",
+                [(r.get("url", ""), r.get("method", ""), r.get("param", ""),
+                  r.get("variant", -1), r.get("outcome", "unknown"),
+                  r.get("ts", now())) for r in ledger])
         if statuses and len(statuses) == len(ids):
             for idx, jid in enumerate(ids):
                 st = statuses[idx]
@@ -2554,6 +2603,12 @@ def cmd_probe_body(spec_file, out_jsonl, status_file=""):
         }
         return rec
 
+    ledger = []
+
+    def _note(url, method, param, variant, outcome):
+        ledger.append({"url": url, "method": method, "param": param,
+                       "variant": variant, "outcome": outcome, "ts": now()})
+
     def probe_one(spec):
         recs = []
         st = {"failed": 0, "authfail": 0, "oos": 0}
@@ -2580,19 +2635,24 @@ def cmd_probe_body(spec_file, out_jsonl, status_file=""):
                     data = json.dumps(trial).encode()
                     res = http_request(url, allowed, method, data, "application/json")
                     if res["error"]:
+                        _note(url, method, ".".join(map(str, path)), -1, "error")
                         st["failed"] += 1
                         break
                     if res["status"] in (401, 403):
+                        _note(url, method, ".".join(map(str, path)), -1, "authfail")
                         st["authfail"] += 1
                         st["failed"] += 1   # untested, not a success
                         break
                     if "html" not in (res["ctype"] or "").lower():
+                        _note(url, method, ".".join(map(str, path)), -1, "non_html")
                         continue
                     if not _executable_reflection(res["body"], tagged):
+                        _note(url, method, ".".join(map(str, path)), -1, "inert")
                         continue  # escaped, inert or JSON-only reflection
                     hit = next((m for m in RAW_MARKERS if m in res["body"]), None)
                     if not hit:
                         continue
+                    _note(url, method, ".".join(map(str, path)), -1, "candidate")
                     rec = make_rec(spec, url, ".".join(map(str, path)), li, tagged, hit)
                     rec["request_file"] = _dump_request(
                         req_dir, method, url, {"Content-Type": "application/json"},
@@ -2627,19 +2687,24 @@ def cmd_probe_body(spec_file, out_jsonl, status_file=""):
                     ctype = "application/x-www-form-urlencoded"
                 res = http_request(req_url, allowed, method, data, ctype)
                 if res["error"]:
+                    _note(url, method, pairs[idx][0], idx, "error")
                     st["failed"] += 1
                     break
                 if res["status"] in (401, 403):
+                    _note(url, method, pairs[idx][0], idx, "authfail")
                     st["authfail"] += 1
                     st["failed"] += 1   # untested, not a success
                     break
                 if "html" not in (res["ctype"] or "").lower():
+                    _note(url, method, pairs[idx][0], idx, "non_html")
                     continue
                 if not _executable_reflection(res["body"], tagged):
+                    _note(url, method, pairs[idx][0], idx, "inert")
                     continue  # escaped, inert or JSON-only reflection
                 hit = next((m for m in RAW_MARKERS if m in res["body"]), None)
                 if not hit:
                     continue
+                _note(url, method, pairs[idx][0], idx, "candidate")
                 rec = make_rec(spec, url, pairs[idx][0], idx, tagged, hit)
                 rec["request_file"] = _dump_request(
                     req_dir, method, req_url,
@@ -2679,6 +2744,13 @@ def cmd_probe_body(spec_file, out_jsonl, status_file=""):
                 for rec in recs:
                     out.write(json.dumps(rec, separators=(",", ":")) + "\n")
                     findings += 1
+    if out_jsonl:
+        try:
+            with open(out_jsonl + ".ledger", "w", encoding="utf-8") as fh:
+                for row in ledger:
+                    fh.write(json.dumps(row, separators=(",", ":")) + "\n")
+        except OSError:
+            pass
     if status_file:
         try:
             with open(status_file, "w", encoding="utf-8") as fh:
@@ -2916,6 +2988,10 @@ def cmd_verify_batch(db, n, out_file, ids_file):
         " WHERE a.state='pending' AND (a.finding_id IS NULL OR " + reportable + ")"
         " ORDER BY a.id LIMIT ?",
         (), n)
+    try:
+        preflight = int(meta_get(c, "verify_preflight", "1") or 0)
+    except Exception:
+        preflight = 1
     keep = []
     with open(out_file, "w", encoding="utf-8") as fh:
         for rid, inj in rows:
@@ -2924,6 +3000,21 @@ def cmd_verify_batch(db, n, out_file, ids_file):
                 c.execute("UPDATE attempts SET state='error', rc=-1, evidence='out_of_scope'"
                           " WHERE id=?", (rid,))
                 continue
+            if preflight:
+                res = http_request(inj, allowed, "GET")
+                if res["error"] and res["error"] != "redirect_not_followed":
+                    c.execute("UPDATE attempts SET state='error', rc=-1,"
+                              " evidence='preflight_error' WHERE id=?", (rid,))
+                    continue
+                loc = res.get("redirect") or ""
+                if res["status"] in (301, 302, 303, 307, 308) and loc:
+                    target = urllib.parse.urljoin(inj, loc)
+                    if not in_scope(target, allowed):
+                        # the browser would leave scope and take the session with it
+                        c.execute("UPDATE attempts SET state='error', rc=-1,"
+                                  " evidence='out_of_scope_redirect: ' || ?"
+                                  " WHERE id=?", (target[:200], rid))
+                        continue
             fh.write(inj + "\n")
             keep.append(rid)
     with open(ids_file, "w", encoding="utf-8") as ih:
@@ -2934,6 +3025,7 @@ def cmd_verify_batch(db, n, out_file, ids_file):
                       [(i,) for i in keep])
     c.execute("COMMIT")
     print(len(keep))
+    return 0
 
 
 def _canon(u):
@@ -2943,7 +3035,7 @@ def _canon(u):
 PROOF_EXTRACTOR = "exec-proof"
 
 
-def _execution_evidence(record, token, injected):
+def _execution_evidence(record, token, injected, allowed=None):
     """Proof must come from the exec-proof extractor of this exact request: the
     token read from document.body.dataset.pwn after script execution. Raw response
     text and other extractors are rejected."""
@@ -2956,6 +3048,10 @@ def _execution_evidence(record, token, injected):
     r_url = record.get("matched-at") or record.get("url") or ""
     if _canon(r_url) != _canon(injected):
         return ""  # evidence from another request is not our proof
+    if allowed is not None:
+        final = record.get("url") or r_url
+        if not in_scope(final, allowed) or not in_scope(r_url, allowed):
+            return ""  # navigation ended off-scope: never accept that proof
     for val in (record.get("extracted-results") or []):
         if str(val).strip() == token:
             return token
@@ -2968,6 +3064,11 @@ def cmd_verify_commit(db, jsonl_file, ids_file, rc="0"):
     ensure(c)
     ids = _ids(ids_file)
     id_set = set(ids)
+    allowed = load_policy(SCOPE_FILE)
+    if not allowed:
+        print("[-] verify-commit: scope policy missing; refusing to accept evidence",
+              file=sys.stderr)
+        return 1
     tokens = {}
     for rid in ids:
         row = c.execute("SELECT token, injected FROM attempts WHERE id=?", (rid,)).fetchone()
@@ -2995,7 +3096,7 @@ def cmd_verify_commit(db, jsonl_file, ids_file, rc="0"):
                     rid, injected = pair
                     if rid not in id_set:
                         continue
-                    ev = _execution_evidence(rec, tok, injected)
+                    ev = _execution_evidence(rec, tok, injected, allowed)
                     if ev:
                         evidence.setdefault(rid, ev)
     conf = neg = err = 0
@@ -3336,7 +3437,23 @@ def cmd_coverage(db, out_file):
                       for k in ("pending", "running", "done", "failed")},
         "body_jobs": {k: sum(v for (kk, s), v in jobs.items()
                              if kk in ("form", "json") and s == k)
-                      for k in ("pending", "running", "done", "failed")},
+                      for k in ("pending", "running", "done", "failed", "skipped")},
+        "body_probing_requested": bool(int(meta_get(c, "forms_post", "0") or 0)),
+        "body_params_tested": c.execute("SELECT COUNT(*) FROM body_results").fetchone()[0],
+        "body_params_by_outcome": {k: v for k, v in c.execute(
+            "SELECT outcome, COUNT(*) FROM body_results GROUP BY outcome")},
+        "tool_versions": {k: (meta_get(c, "ver_" + k, "") or "")
+                          for k in ("nuclei", "httpx", "katana", "chromium")},
+        "discovery_caps": {
+            "js_max_bundles": int(meta_get(c, "js_max_bundles", "0") or 0),
+            "js_extract_cap": int(meta_get(c, "js_extract_cap", "0") or 0),
+            "js_discovered": int(meta_get(c, "js_discovered", "0") or 0),
+            "js_processed": int(meta_get(c, "js_processed", "0") or 0),
+            "js_capped": int(meta_get(c, "js_capped", "0") or 0),
+            "js_rounds": int(meta_get(c, "js_rounds", "0") or 0),
+            "url_cap": int(meta_get(c, "url_cap", "0") or 0),
+            "jobs_cap": int(meta_get(c, "jobs_cap", "0") or 0),
+        },
         "attempts": {k: att.get(k, 0) for k in ("pending", "running", "confirmed",
                                                 "not_confirmed", "error")},
         "discovery": disc,
@@ -3395,6 +3512,7 @@ def _dispatch(argv):
         "merge-run": cmd_merge_run,
         "js-extract": cmd_js_extract, "inline-scripts": cmd_inline_scripts,
         "path-abort": cmd_path_abort, "body-batch": cmd_body_batch,
+        "body-skip": cmd_body_skip,
         "body-abort": cmd_body_abort, "export": cmd_export, "stats": cmd_stats,
         "coverage": cmd_coverage, "ctxfilter": cmd_ctxfilter, "verify-plan": cmd_verify_plan,
         "verify-report": cmd_verify_report,

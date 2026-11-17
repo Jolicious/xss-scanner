@@ -49,18 +49,6 @@ http:
         words:
           - "text/html"
 
-      - type: word
-        part: body
-        negative: true
-        words:
-          - "%3Csvg"
-          - "%3csvg"
-          - "&lt;svg"
-          - "\\u003csvg"
-          - "&#60;svg"
-          - "\\\"><svg"
-          - "\\\"><img"
-          - "\\'><svg"
 
     extractors:
       - type: regex

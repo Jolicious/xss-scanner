@@ -1,0 +1,72 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  NUCLEI_VERSION: "3.11.1"
+  HTTPX_VERSION: "1.9.0"
+
+jobs:
+  unit:
+    name: syntax + queue tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: shell syntax
+        run: bash -n xss-scan.sh
+      - name: python syntax
+        run: python -m py_compile xss-queue.py xss-report.py
+      - name: yaml templates parse
+        run: |
+          python -m pip install --quiet pyyaml
+          python - <<'PY'
+          import glob, yaml
+          for f in sorted(glob.glob("*.yaml")):
+              yaml.safe_load(open(f))
+              print("ok", f)
+          PY
+      - name: host-status + classifier regressions
+        run: python tests/test_host_status.py
+
+  tools:
+    name: notify + resume regressions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: install httpx (pinned)
+        run: |
+          curl -sSL "https://github.com/projectdiscovery/httpx/releases/download/v${HTTPX_VERSION}/httpx_${HTTPX_VERSION}_linux_amd64.zip" -o httpx.zip
+          unzip -q httpx.zip httpx && sudo mv httpx /usr/local/bin/ && httpx -version
+      - name: --no-notify vs provider discovery
+        run: bash tests/test_notify.sh
+      - name: SIGTERM + --continue resume
+        run: bash tests/test_resume.sh
+
+  browser:
+    name: nuclei + chromium execution proof
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: install nuclei (pinned)
+        run: |
+          curl -sSL "https://github.com/projectdiscovery/nuclei/releases/download/v${NUCLEI_VERSION}/nuclei_${NUCLEI_VERSION}_linux_amd64.zip" -o nuclei.zip
+          unzip -q nuclei.zip nuclei && sudo mv nuclei /usr/local/bin/ && nuclei -version
+      - uses: browser-actions/setup-chrome@v1
+        id: chrome
+      - name: acceptance fixtures (positive + negative execution)
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: python tests/fixture_suite.py

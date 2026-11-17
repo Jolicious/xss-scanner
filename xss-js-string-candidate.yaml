@@ -68,23 +68,6 @@ http:
           - "text/html"
 
       # suppress escaped/encoded echoes (entities, JS escapes, percent)
-      - type: word
-        part: body
-        negative: true
-        words:
-          - '%22%3Balert'
-          - '%27%3Balert'
-          - '&quot;;alert'
-          - '&#34;;alert'
-          - '&#39;;alert'
-          - '&#x27;;alert'
-          - '&#X27;;alert'
-          - '&#x22;;alert'
-          - '\";alert'
-          - '\'';alert'
-          - '\u0027;alert'
-          - '\u0022;alert'
-          - '\x27;alert'
 
     extractors:
       - type: regex

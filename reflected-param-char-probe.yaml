@@ -57,20 +57,6 @@ http:
         words:
           - "text/html"
 
-      - type: word
-        part: body
-        negative: true
-        words:
-          - "%20onmouseover"
-          - "&quot; onmouseover"
-          - "&#34; onmouseover"
-          - "&#39; onmouseover"
-          - "&lt;/script"
-          - "\\u003cscript"
-          # backslash-escaped quote is not a breakout
-          - "\\\" onmouseover"
-          - "\\' onmouseover"
-          - "\\\"><script"
 
     extractors:
       - type: regex

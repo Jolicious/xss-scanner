@@ -64,20 +64,6 @@ http:
         words:
           - "text/html"
 
-      - type: word
-        part: body
-        negative: true
-        words:
-          - "%3Csvg"
-          - "%3csvg"
-          - "&lt;svg"
-          - "\\u003csvg"
-          - "&#60;svg"
-          - "&#x3c;svg"
-          # backslash-escaped quote (e.g. JSON: "x":"\"><svg...") is NOT a breakout
-          - "\\\"><svg"
-          - "\\\"><img"
-          - "\\'><svg"
 
     extractors:
       - type: regex

@@ -30,8 +30,8 @@
 #       --max-jobs N      global cap on path+body jobs (0 = all)
 #       --max-disk-mb N   pause before a batch above N MB (default 2048)
 #       --forms           discover HTML forms and probe GET forms
-#       --forms-post      probe POST forms (default on; state-changing risk)
-#       --no-forms-post   disable POST form probing for read-only engagements
+#       --forms-post      probe POST forms (OPT-IN: state-changing requests)
+#       --no-forms-post   force POST form probing off (default)
 #       --form-max N      max pages parsed for forms (default 200)
 #       --json-file F     JSON body targets, one JSON spec per line
 #       --body-batch N    body targets per batch (default 100)
@@ -149,7 +149,10 @@ FORM_MAX="${FORM_MAX:-0}"
 STEP_TIMEOUT="${STEP_TIMEOUT:-1800}"
 NUCLEI_TIMEOUT="${NUCLEI_TIMEOUT:-3600}"
 VERIFY_TIMEOUT="${VERIFY_TIMEOUT:-900}"
-DO_GAU=1; DO_CRAWL=1; DO_VERIFY=0; DO_FORMS=1; FORMS_POST=1; DO_JS=1
+FORMS_POST_EXPLICIT=0; FORMS_POST_ASSUMED=0
+if [ "${XSS_FORMS_POST:-0}" = 1 ]; then FORMS_POST=1; FORMS_POST_EXPLICIT=1; FORMS_POST_ASSUMED=1; fi
+DO_GAU=1; DO_CRAWL=1; DO_VERIFY=0; DO_FORMS=1; DO_JS=1
+: "${FORMS_POST:=0}"
 VERIFY_EXPLICIT=0; RATE_SET=0; CONC_SET=0; DISK_SET=0; NOTIFY_EXPLICIT=0
 COMPACT=0; RESUME=1; CONTINUE=0; RECHECK=0; RETRY_FAILED=0; STRICT=1; REDISCOVER=0
 SILENT=0; PER_HOST=0; PER_HOST_CHUNK=1; PER_HOST_JOBS=3; DO_REQUEUE_THROTTLED=1; DO_SITEMAP=1; API_REFLECT=0
@@ -210,7 +213,7 @@ while [ $# -gt 0 ]; do
     --max-jobs)       MAX_JOBS="${2:-}"; shift 2;;
     --max-disk-mb)    MAX_DISK_MB="${2:-}"; DISK_SET=1; shift 2;;
     --forms)          DO_FORMS=1; shift;;
-    --forms-post)     DO_FORMS=1; FORMS_POST=1; shift;;
+    --forms-post)     DO_FORMS=1; FORMS_POST=1; FORMS_POST_EXPLICIT=1; shift;;
     --no-forms-post)  FORMS_POST=0; shift;;
     --form-max)       FORM_MAX="${2:-}"; shift 2;;
     --json-file)      JSON_FILE="${2:-}"; shift 2;;
@@ -320,6 +323,7 @@ run_per_host() {
   case "$chunk" in ''|*[!0-9]*) chunk=1;; esac
   [ "$chunk" -ge 1 ] || chunk=1
   mkdir -p "$hostf" "$parts"
+  rm -f "$hostf"/seeds.* "$hostf"/hosts.* 2>/dev/null || true
   # the parent exits before the normal auto-notify block, so resolve it here
   # (an explicit --no-notify must never be overridden by provider discovery)
   if [ "$NOTIFY_EXPLICIT" = 0 ] && [ "$NOTIFY" = 0 ] && [ -f "$NOTIFY_CONFIG" ]; then
@@ -489,9 +493,11 @@ run_per_host() {
       [ "$RUNNING" -lt "$PH_JOBS" ] && break
       sleep 1
     done
-    _cfseeds="$cf.seeds"
+    # helper files must not share the chunk prefix, or the resume glob
+    # treats them as chunk lists and creates phantom parts
+    _cfseeds="$hostf/seeds.$(basename "$cf")"
     : > "$_cfseeds"
-    _cfhosts="$cf.hosts"
+    _cfhosts="$hostf/hosts.$(basename "$cf")"
     sed -E 's#^[a-z][a-z0-9+.-]*://##; s#[/?#].*$##' "$cf" | sort -u > "$_cfhosts"
     while IFS= read -r _u; do
       case "$_u" in http://*|https://*) ;; *) continue;; esac
@@ -894,6 +900,9 @@ if [ "$NOTIFY_EXPLICIT" = 0 ] && [ -f "$NOTIFY_CONFIG" ]; then
   fi
 fi
 [ "$SILENT" = 0 ] && echo "[*] auto: rate=$RATE conc=$CONC threads=$THREADS disk_cap=${MAX_DISK_MB}MB verify=$DO_VERIFY forms=$DO_FORMS post=$FORMS_POST body_batch=$BODY_BATCH"
+if [ "$FORMS_POST" = 1 ] && [ "$FORMS_POST_ASSUMED" = 0 ]; then
+  warn "POST form probing enabled: this sends state-changing requests (opt-in)"
+fi
 export MAX_BODY_PARAMS="${MAX_BODY_PARAMS:-40}"
 
 # ---- 2. immutable config fingerprint ----
@@ -1021,6 +1030,18 @@ CONFIG_ID=$( { printf '%s\n' "$SCOPE_SHA" "$TMPL_SHA" "$AUTH_SHA" \
 # ---- 3. queue init / recovery ----
 python3 "$QHELPER" init "$Q" || die "queue init failed"
 python3 "$QHELPER" meta-set "$Q" verify_requested "$DO_VERIFY" 2>/dev/null || true
+python3 "$QHELPER" meta-set "$Q" forms_post "$FORMS_POST" 2>/dev/null || true
+for _tool in NUCLEI_BIN HTTPX_BIN; do
+  _name=$(printf '%s' "$_tool" | tr 'A-Z' 'a-z' | sed 's/_bin$//')
+  _path="${!_tool:-}"
+  [ -n "$_path" ] || continue
+  _ver=$("$_path" -version 2>/dev/null | head -1 | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  [ -n "$_ver" ] && python3 "$QHELPER" meta-set "$Q" "ver_$_name" "$_ver" 2>/dev/null || true
+done
+if [ -n "${CHROME_PATH:-}" ]; then
+  _cv=$("$CHROME_PATH" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  [ -n "$_cv" ] && python3 "$QHELPER" meta-set "$Q" ver_chromium "$_cv" 2>/dev/null || true
+fi
 python3 "$QHELPER" meta-set "$Q" jobs_cap "$MAX_JOBS" 2>/dev/null || true
 python3 "$QHELPER" meta-set "$Q" url_cap "$MAX_TOTAL" 2>/dev/null || true
 python3 "$QHELPER" meta-set "$Q" config_id "$CONFIG_ID" 2>/dev/null || true
@@ -1363,6 +1384,17 @@ EOS
       trim_log "$LOGS/js.log" 2097152
       [ "$JRC" -eq 0 ] || { warn "js-extract rc=$JRC"; break; }
     done
+    # record what discovery actually covered versus what it was allowed to cover
+    JSD=$( [ -f "$OUT/.js-all.txt" ] && wc -l < "$OUT/.js-all.txt" | tr -d ' ' || echo 0)
+    JSP=$( [ -f "$OUT/.js-done.txt" ] && wc -l < "$OUT/.js-done.txt" | tr -d ' ' || echo 0)
+    case "${JSD:-0}" in ''|*[!0-9]*) JSD=0;; esac
+    case "${JSP:-0}" in ''|*[!0-9]*) JSP=0;; esac
+    python3 "$QHELPER" meta-set "$Q" js_discovered "$JSD" 2>/dev/null || true
+    python3 "$QHELPER" meta-set "$Q" js_processed "$JSP" 2>/dev/null || true
+    python3 "$QHELPER" meta-set "$Q" js_capped "$((JSD - JSP))" 2>/dev/null || true
+    python3 "$QHELPER" meta-set "$Q" js_rounds "$JROUND" 2>/dev/null || true
+    python3 "$QHELPER" meta-set "$Q" js_max_bundles "${MAX_JS:-4000}" 2>/dev/null || true
+    python3 "$QHELPER" meta-set "$Q" js_extract_cap "${MAX_JS_URLS:-50000}" 2>/dev/null || true
     # inline <script> blocks on HTML pages (SPA bootstrap/config literals)
     rm -rf "$OUT/.js-inline"
     IN_N=$(python3 "$QHELPER" inline-scripts "$Q" "$OUT/.js-inline" \
@@ -1713,6 +1745,9 @@ done
 
 # ---- 9. body (form / JSON) batches ----
 BIDX=0
+if [ "$FORMS_POST" = 0 ]; then
+  python3 "$QHELPER" body-skip "$Q" 2>>"$LOGS/body.log" || warn "body-skip failed"
+fi
 python3 "$QHELPER" promote-jobs "$Q" 2>/dev/null || true
 while :; do
   if [ -f "$OUT/STOP" ]; then
@@ -1886,7 +1921,7 @@ if [ "$COMPACT" = 1 ]; then
   fi
 fi
 echo "[*] disk used: $(du -sh "$OUT" 2>/dev/null | cut -f1)  files: $(find "$OUT" -type f | wc -l | tr -d ' ')"
-rm -f "$OUT"/.batch.* "$OUT"/.path.* "$OUT"/.body.* "$OUT"/.va.* 2>/dev/null
+rm -f "$OUT"/.batch.* "$OUT"/.path.* "$OUT"/.body.* "$OUT"/.body.*.ledger "$OUT"/.va.* 2>/dev/null
 
 COMPLETE=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["complete"])' \
   "$OUT/coverage.json" 2>/dev/null || echo False)
