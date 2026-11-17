@@ -1027,6 +1027,19 @@ def cmd_merge_run(child_dir, parent_dir):
     return 0
 
 
+def _job_host(target):
+    """Host that owns a job: form/JSON jobs store a JSON spec with a url field."""
+    t = (target or "").strip()
+    if t.startswith("{"):
+        try:
+            spec = json.loads(t)
+            if isinstance(spec, dict) and spec.get("url"):
+                return _host_key(str(spec["url"]))
+        except Exception:
+            pass
+    return _host_key(t)
+
+
 def cmd_host_status(db, hosts_file, done_file, log_file="", urls_done_file=""):
     """Track which domains have no outstanding work left.
 
@@ -1056,7 +1069,7 @@ def cmd_host_status(db, hosts_file, done_file, log_file="", urls_done_file=""):
         else:
             pending[h] = pending.get(h, 0) + 1
     for target, state, kind in c.execute("SELECT target,state,kind FROM jobs"):
-        h = _host_key(target)
+        h = _job_host(target)
         if h not in scope:
             continue
         if state != "done":
@@ -1870,7 +1883,9 @@ def cmd_body_commit(db, id_file, jsonl_file, rc="0", status_file=""):
         except OSError:
             statuses = []
     valid = {"ok", "failed", "deferred"}
-    if statuses:
+    if status_file:
+        # whenever a status file is supplied it must cover every claimed job,
+        # regardless of the probe exit code
         if len(statuses) != len(ids):
             print("[-] body-commit rejected: %d status record(s) for %d job(s)"
                   % (len(statuses), len(ids)), file=sys.stderr)
@@ -2312,7 +2327,12 @@ def _dump_request(req_dir, method, url, headers, data, param):
         os.makedirs(req_dir, exist_ok=True)
         safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", (param or "param"))[:40]
         safe_url = re.sub(r"[^A-Za-z0-9]+", "_", url.split("://", 1)[-1])[:60]
-        path = os.path.join(req_dir, "%s_%s_%s.txt" % (safe_url, safe, (method or "GET").lower()))
+        import hashlib
+        blob = (str(method) + "\n" + str(url) + "\n").encode() + (
+            data if isinstance(data, bytes) else str(data or "").encode())
+        digest = hashlib.sha1(blob).hexdigest()[:10]
+        path = os.path.join(req_dir, "%s_%s_%s_%s.txt"
+                            % (safe_url, safe, (method or "GET").lower(), digest))
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(_raw_request(method, url, headers, data))
         return path

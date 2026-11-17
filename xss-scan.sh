@@ -1322,8 +1322,18 @@ EOS
       : > "$URLTMP"
     fi
 
-    python3 "$QHELPER" discovery-set "$Q" js pages done 0
-    python3 "$QHELPER" meta-set "$Q" js_rev 3 2>/dev/null || true
+    JSFAIL=0
+    if [ -f "$OUT/.js-dl/rc.txt" ]; then
+      JSFAIL=$(grep -cE '^[1-9]' "$OUT/.js-dl/rc.txt" 2>/dev/null || echo 0)
+    fi
+    case "${JSFAIL:-0}" in ''|*[!0-9]*) JSFAIL=0;; esac
+    if [ "$JSFAIL" -gt 0 ]; then
+      warn "js mining: ${JSFAIL} bundle download(s) failed; stage marked partial"
+      python3 "$QHELPER" discovery-set "$Q" js pages partial "$JSFAIL"
+    else
+      python3 "$QHELPER" discovery-set "$Q" js pages done 0
+      python3 "$QHELPER" meta-set "$Q" js_rev 3 2>/dev/null || true
+    fi
     rm -rf "$OUT/.js-dl" "$OUT/.js-fetch.sh" "$OUT/.js-all.txt" "$OUT/.js-urls.txt"
   fi
 fi
