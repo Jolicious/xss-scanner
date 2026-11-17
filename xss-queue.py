@@ -1262,7 +1262,7 @@ def cmd_new_candidates(db, out_file, marker_file="cand-notified.id", key_file=""
         if param:
             lines.append("    param=%s" % param)
     try:
-        with open(marker_file, "w", encoding="utf-8") as fh:
+        with open(marker_file + ".pending", "w", encoding="utf-8") as fh:
             fh.write(str(top))
     except OSError:
         pass
@@ -1398,7 +1398,7 @@ def cmd_confirmed_new(db, out_file, marker_file="confirmed-notified.id", key_fil
         if pname:
             lines.append("    param=%s" % pname)
     try:
-        with open(marker_file, "w", encoding="utf-8") as fh:
+        with open(marker_file + ".pending", "w", encoding="utf-8") as fh:
             fh.write(str(top))
     except OSError:
         pass
@@ -2343,6 +2343,26 @@ def _dump_request(req_dir, method, url, headers, data, param):
         return ""
 
 
+def _executable_reflection(body, tagged):
+    """True when the exact tagged payload sits in an executable HTML context.
+
+    A verbatim copy inside <script type="application/json"> / __NEXT_DATA__ /
+    comments / textarea / title / noscript / style is data, not XSS.
+    """
+    if not body or not tagged:
+        return False
+    stripped = re.sub(r"<script[^>]*type=[\"']application/(?:ld\+)?json[\"'][^>]*>.*?</script>",
+                      "", body, flags=re.I | re.S)
+    stripped = re.sub(r"<script[^>]*id=[\"']__NEXT_DATA__[\"'][^>]*>.*?</script>",
+                      "", stripped, flags=re.I | re.S)
+    # note: HTML comments are not stripped here - the per-attempt token lives in
+    # <!--...--> and stripping it would hide a genuine reflection
+    for pat in (r"<textarea\b.*?</textarea>", r"<title\b.*?</title>",
+                r"<xmp\b.*?</xmp>", r"<noscript\b.*?</noscript>", r"<style\b.*?</style>"):
+        stripped = re.sub(pat, "", stripped, flags=re.I | re.S)
+    return tagged in stripped
+
+
 def _reflected_with_token(body, token, markers, span=80):
     """True only when a RAW marker is adjacent to our token.
 
@@ -2490,8 +2510,8 @@ def cmd_probe_body(spec_file, out_jsonl, status_file=""):
                         break
                     if "html" not in (res["ctype"] or "").lower():
                         continue
-                    if tagged not in res["body"]:
-                        continue  # only a raw, unmodified reflection counts
+                    if not _executable_reflection(res["body"], tagged):
+                        continue  # escaped, inert or JSON-only reflection
                     hit = next((m for m in RAW_MARKERS if m in res["body"]), None)
                     if not hit:
                         continue
@@ -2536,8 +2556,8 @@ def cmd_probe_body(spec_file, out_jsonl, status_file=""):
                     break
                 if "html" not in (res["ctype"] or "").lower():
                     continue
-                if tagged not in res["body"]:
-                    continue  # escaped or static marker, not our raw payload
+                if not _executable_reflection(res["body"], tagged):
+                    continue  # escaped, inert or JSON-only reflection
                 hit = next((m for m in RAW_MARKERS if m in res["body"]), None)
                 if not hit:
                     continue

@@ -370,6 +370,13 @@ run_per_host() {
         [ -d "$_old" ] || continue
         [ "$_old" = "$part/" ] && continue
         if [ -f "$_old/hosts.txt" ] && grep -qxF "$CF_HOST" "$_old/hosts.txt"; then
+          # grouped chunks: every host in this chunk must exist in the old state
+          _all=1
+          while IFS= read -r _cfh; do
+            _cfh=$(printf '%s' "$_cfh" | sed -E 's#^[a-z][a-z0-9+.-]*://##; s#[/?#].*$##')
+            grep -qxF "$_cfh" "$_old/hosts.txt" || { _all=0; break; }
+          done < "$cf"
+          [ "$_all" = 1 ] || continue
           mv -f "$_old" "$part" 2>/dev/null && say "--continue: resumed existing state for $CF_HOST"
           break
         fi
@@ -487,9 +494,19 @@ run_per_host() {
     rm -rf "$parts"
   fi
   export PH_TOTAL="$total"
-  DONEH=$(num "$(wc -l < "$OUT/hosts-done.txt" 2>/dev/null || echo 0)")
+  MISSING=0
+  if [ -f "$OUT/.alive-batch.txt" ]; then
+    sed -E 's#^[a-z][a-z0-9+.-]*://##; s#[/?#].*$##' "$OUT/.alive-batch.txt" \
+      | sort -u > "$OUT/.alive-hosts.txt" 2>/dev/null || true
+    MISSING=$(comm -23 "$OUT/.alive-hosts.txt" <(sort -u "$OUT/hosts-done.txt" 2>/dev/null) \
+              | grep -c . 2>/dev/null || echo 0)
+  else
+    DONEH=$(num "$(wc -l < "$OUT/hosts-done.txt" 2>/dev/null || echo 0)")
+    [ "$DONEH" -lt "$total" ] && MISSING=1
+  fi
+  case "${MISSING:-0}" in ''|*[!0-9]*) MISSING=0;; esac
   PH_RC=0
-  if [ "$DONEH" -lt "$total" ]; then
+  if [ "$MISSING" -gt 0 ]; then
     PH_RC=3
     python3 - "$OUT/coverage.json" <<'PY'
 import json, os, sys
@@ -1542,6 +1559,8 @@ while :; do
         case "${NC:-0}" in ''|*[!0-9]*) NC=0;; esac
         if [ "$NC" -gt 0 ] && notify_file "$OUT/.notify-live.txt" "query batch $BATCH_IDX"; then
           cat "$OUT/.cand-notified.keys.pending" >> "$OUT/.cand-notified.keys" 2>/dev/null || true
+          [ -f "$OUT/.cand-notified.id.pending" ] && \
+            mv -f "$OUT/.cand-notified.id.pending" "$OUT/.cand-notified.id"
         fi
         rm -f "$OUT/.cand-notified.keys.pending" "$OUT/.notify-live.txt"
         rm -f "$OUT/.notify-live.txt"
@@ -1631,6 +1650,8 @@ while :; do
       case "${NC:-0}" in ''|*[!0-9]*) NC=0;; esac
       if [ "$NC" -gt 0 ] && notify_file "$OUT/.notify-live.txt" "path batch $PIDX"; then
         cat "$OUT/.cand-notified.keys.pending" >> "$OUT/.cand-notified.keys" 2>/dev/null || true
+        [ -f "$OUT/.cand-notified.id.pending" ] && \
+          mv -f "$OUT/.cand-notified.id.pending" "$OUT/.cand-notified.id"
       fi
       rm -f "$OUT/.cand-notified.keys.pending" "$OUT/.notify-live.txt"
       rm -f "$OUT/.notify-live.txt"
@@ -1801,6 +1822,8 @@ if [ "$DO_VERIFY" = 1 ] && [ "$TOTAL" -gt 0 ]; then
       if [ "$NEWC" -gt 0 ]; then
         if notify_file "$OUT/.notify-live.txt" "confirmed batch $VC"; then
           cat "$OUT/.notify-confirmed.keys.pending" >> "$OUT/.notify-confirmed.keys" 2>/dev/null || true
+          [ -f "$OUT/.confirmed-notified.id.pending" ] && \
+            mv -f "$OUT/.confirmed-notified.id.pending" "$OUT/.confirmed-notified.id"
         else
           warn "confirmed notify failed (see logs/notify.log)"
         fi
