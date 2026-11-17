@@ -1705,9 +1705,9 @@ while :; do
   timeout --foreground "${BODY_TIMEOUT:-1800}" python3 "$QHELPER" probe-body \
     "$OUT/.body.$$.txt" "$BODYJ" "$BSTATUS" 2>>"$LOGS/body.log"
   RC=$?
-  if { [ "$RC" -eq 0 ] || [ "$RC" -eq 6 ]; } \
-     && python3 "$QHELPER" body-commit "$Q" "$OUT/.body.$$.txt.ids" "$BODYJ" "$RC" "$BSTATUS" \
-          2>>"$LOGS/commit.log"; then
+  # rc 3/4/5/6 all can carry valid per-target results; the status file decides
+  if python3 "$QHELPER" body-commit "$Q" "$OUT/.body.$$.txt.ids" "$BODYJ" "$RC" "$BSTATUS" \
+       2>>"$LOGS/commit.log"; then
     if [ "$NOTIFY" = 1 ] && [ "$NOTIFY_LIVE" = 1 ] && [ -s "$BODYJ" ]; then
       if notify_from_jsonl "$BODYJ" "$OUT/.notify-live.txt" \
            "MANUAL POST XSS — not confirmed, verify manually (batch $BIDX)" \

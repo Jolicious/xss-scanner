@@ -2523,6 +2523,7 @@ def cmd_probe_body(spec_file, out_jsonl, status_file=""):
                         break
                     if res["status"] in (401, 403):
                         st["authfail"] += 1
+                        st["failed"] += 1   # untested, not a success
                         break
                     if "html" not in (res["ctype"] or "").lower():
                         continue
@@ -2569,6 +2570,7 @@ def cmd_probe_body(spec_file, out_jsonl, status_file=""):
                     break
                 if res["status"] in (401, 403):
                     st["authfail"] += 1
+                    st["failed"] += 1   # untested, not a success
                     break
                 if "html" not in (res["ctype"] or "").lower():
                     continue
