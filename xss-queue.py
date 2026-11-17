@@ -2364,11 +2364,18 @@ def _executable_reflection(body, tagged):
     # (but not when it sits inside a JSON data script)
     low = tagged.lower()
     if low.startswith("<script") or "</script" in low:
-        no_json = re.sub(r"<script\b[^>]*type=[\"']application/(?:ld\+)?json[\"'][^>]*>.*?</script>",
-                         "", body, flags=re.I | re.S)
-        no_json = re.sub(r"<script\b[^>]*id=[\"']__NEXT_DATA__[\"'][^>]*>.*?</script>",
-                         "", no_json, flags=re.I | re.S)
-        return tagged in no_json
+        # script payloads: still inert inside comments / templates / textareas.
+        # Script blocks themselves are kept: an injected </script> really does
+        # terminate the surrounding element and start real markup.
+        ctx = re.sub(r"<script\b[^>]*type=[\"']application/(?:ld\+)?json[\"'][^>]*>.*?</script>",
+                     "", body, flags=re.I | re.S)
+        ctx = re.sub(r"<script\b[^>]*id=[\"']__NEXT_DATA__[\"'][^>]*>.*?</script>",
+                     "", ctx, flags=re.I | re.S)
+        for pat in (r"<!--.*?-->", r"<template\b[^>]*>.*?</template>",
+                    r"<textarea\b.*?</textarea>", r"<title\b.*?</title>",
+                    r"<xmp\b.*?</xmp>", r"<noscript\b.*?</noscript>", r"<style\b.*?</style>"):
+            ctx = re.sub(pat, "", ctx, flags=re.I | re.S)
+        return tagged in ctx
     return False
 
 

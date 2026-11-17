@@ -346,7 +346,9 @@ run_per_host() {
       HA+=(-H "Authorization: Bearer $TOKEN")
     fi
     timeout --foreground "${STEP_TIMEOUT:-1800}" "$HTTPX_BIN" "${HA[@]}" \
-      -o "$OUT/.alive-batch.txt" 2>>"$OUT/logs/per-host.log" || true
+      -o "$OUT/.alive-batch.txt" 2>>"$OUT/logs/per-host.log"
+    HRC=$?
+    [ "$HRC" -ne 0 ] && warn "alive probe exited rc=$HRC (see logs/per-host.log)"
   fi
   ALIVE_BATCH=$(num "$(wc -l < "$OUT/.alive-batch.txt" 2>/dev/null || echo 0)")
   echo "[*] alive: $ALIVE_BATCH/$total — only these get a pipeline"
