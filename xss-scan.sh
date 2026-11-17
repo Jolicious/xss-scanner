@@ -1525,6 +1525,7 @@ while :; do
           esac
         done
       fi
+      python3 "$QHELPER" meta-incr "$Q" detection_batches >/dev/null 2>&1 || true
       rm -f "$OUT/.batch.$$.txt" "$OUT/.batch.$$.bak" "$BJ"
       trim_log "$LOGS/nuclei-batch-$BATCH_IDX.log" 4194304
     fi
@@ -1597,6 +1598,7 @@ while :; do
       rm -f "$OUT/.cand-notified.keys.pending" "$OUT/.notify-live.txt"
       rm -f "$OUT/.notify-live.txt"
     fi
+    python3 "$QHELPER" meta-incr "$Q" detection_batches >/dev/null 2>&1 || true
     rm -f "$OUT/.path.$$.txt" "$OUT/.path.$$.txt.ids" "$PJ"
     trim_log "$LOGS/nuclei-path-$PIDX.log" 4194304
   else
@@ -1638,10 +1640,14 @@ while :; do
   BODYJ="$OUT/.body.$BIDX.$$.jsonl"
   echo "[*] body batch $BIDX at $(date +%H:%M:%S): $COUNT target(s)"
   stage "body"
-  timeout --foreground "${BODY_TIMEOUT:-1800}" python3 "$QHELPER" probe-body "$OUT/.body.$$.txt" "$BODYJ" \
-    2>>"$LOGS/body.log"
+  BSTATUS="$OUT/.body.$$.status"
+  : > "$BSTATUS"
+  timeout --foreground "${BODY_TIMEOUT:-1800}" python3 "$QHELPER" probe-body \
+    "$OUT/.body.$$.txt" "$BODYJ" "$BSTATUS" 2>>"$LOGS/body.log"
   RC=$?
-  if [ "$RC" -eq 0 ] && python3 "$QHELPER" body-commit "$Q" "$OUT/.body.$$.txt.ids" "$BODYJ" "$RC" 2>>"$LOGS/commit.log"; then
+  if { [ "$RC" -eq 0 ] || [ "$RC" -eq 6 ]; } \
+     && python3 "$QHELPER" body-commit "$Q" "$OUT/.body.$$.txt.ids" "$BODYJ" "$RC" "$BSTATUS" \
+          2>>"$LOGS/commit.log"; then
     if [ "$NOTIFY" = 1 ] && [ "$NOTIFY_LIVE" = 1 ] && [ -s "$BODYJ" ]; then
       if notify_from_jsonl "$BODYJ" "$OUT/.notify-live.txt" \
            "MANUAL POST XSS — not confirmed, verify manually (batch $BIDX)" \
@@ -1652,12 +1658,12 @@ while :; do
       rm -f "$OUT/.notify-pending.txt"
       rm -f "$OUT/.notify-live.txt"
     fi
-    rm -f "$OUT/.body.$$.txt" "$OUT/.body.$$.txt.ids" "$BODYJ"
+    rm -f "$OUT/.body.$$.txt" "$OUT/.body.$$.txt.ids" "$BODYJ" "$BSTATUS"
     trim_log "$LOGS/live.log" 4194304
   else
     warn "body batch $BIDX rc=$RC; slow/timed-out targets kept for retry (scan continues)"
     python3 "$QHELPER" body-abort "$Q" "$OUT/.body.$$.txt.ids" "${RC:-1}" 2>/dev/null || true
-    rm -f "$OUT/.body.$$.txt" "$OUT/.body.$$.txt.ids"
+    rm -f "$OUT/.body.$$.txt" "$OUT/.body.$$.txt.ids" "$BSTATUS"
     # body probing is best-effort: never abort the whole scan on it
   fi
 done

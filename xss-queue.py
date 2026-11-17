@@ -717,6 +717,13 @@ def _ctx_survives(allowed, url, tid, markers):
     for pat in (r"<!--.*?-->", r"<textarea\b.*?</textarea>", r"<title\b.*?</title>",
                 r"<xmp\b.*?</xmp>", r"<noscript\b.*?</noscript>", r"<style\b.*?</style>"):
         stripped = re.sub(pat, "", stripped, flags=re.I | re.S)
+    # payload only inside <script>: executable only with a quote breakout
+    no_script = re.sub(r"<script\b.*?</script>", "", stripped, flags=re.I | re.S)
+    if any(m in stripped for m in markers) and not any(m in no_script for m in markers):
+        breakout = any(";alert" in m for m in markers) and any(
+            ('"' in m or "'" in m) for m in markers)
+        if not breakout:
+            return False, "script_string"
     if any(m in stripped for m in markers):
         return True, "html"
     if _only_escaped(markers, stripped):
@@ -1851,11 +1858,18 @@ def cmd_path_commit(db, id_file, jsonl_file):
     return 0
 
 
-def cmd_body_commit(db, id_file, jsonl_file, rc="0"):
+def cmd_body_commit(db, id_file, jsonl_file, rc="0", status_file=""):
     c = connect(db)
     ensure(c)
     ids = _ids(id_file)
-    if int(rc) != 0:
+    statuses = []
+    if status_file and os.path.exists(status_file):
+        try:
+            statuses = [l.strip() for l in open(status_file, encoding="utf-8")
+                        if l.strip()]
+        except OSError:
+            statuses = []
+    if int(rc) != 0 and not statuses:
         print("[-] body-commit rejected: probe rc=%s (requests failed)" % rc,
               file=sys.stderr)
         return 1
@@ -1867,7 +1881,20 @@ def cmd_body_commit(db, id_file, jsonl_file, rc="0"):
     try:
         c.execute("BEGIN IMMEDIATE")
         added = _insert_findings(c, rows, _config_id(c))
-        c.executemany("UPDATE jobs SET state='done' WHERE id=?", [(i,) for i in ids])
+        if statuses and len(statuses) == len(ids):
+            for idx, jid in enumerate(ids):
+                st = statuses[idx]
+                if st == "ok":
+                    c.execute("UPDATE jobs SET state='done' WHERE id=?", (jid,))
+                elif st == "deferred":
+                    c.execute("UPDATE jobs SET state='pending' WHERE id=?", (jid,))
+                else:  # failed request: retry once, then park as failed
+                    c.execute("UPDATE jobs SET tries=tries+1 WHERE id=?", (jid,))
+                    row = c.execute("SELECT tries FROM jobs WHERE id=?", (jid,)).fetchone()
+                    new_state = "failed" if row and row[0] >= 2 else "pending"
+                    c.execute("UPDATE jobs SET state=? WHERE id=?", (new_state, jid))
+        else:
+            c.executemany("UPDATE jobs SET state='done' WHERE id=?", [(i,) for i in ids])
         c.execute("COMMIT")
     except Exception as exc:
         try:
@@ -2282,7 +2309,7 @@ def _dump_request(req_dir, method, url, headers, data, param):
         return ""
 
 
-def cmd_probe_body(spec_file, out_jsonl):
+def cmd_probe_body(spec_file, out_jsonl, status_file=""):
     """Probe POST/JSON body inputs for reflection, in parallel.
 
     Slow CGI endpoints made the sequential version miss most targets before its
@@ -2465,6 +2492,7 @@ def cmd_probe_body(spec_file, out_jsonl):
         return recs, st, True
 
     findings = targets = failed = oos = authfail = deferred = 0
+    _status = []
     from concurrent.futures import ThreadPoolExecutor
     workers = max(1, min(conc, 32))
     with open(out_jsonl, "w", encoding="utf-8") as out:
@@ -2479,6 +2507,12 @@ def cmd_probe_body(spec_file, out_jsonl):
                     failed += 1
                     continue
                 targets += 1
+                if st["failed"]:
+                    _status.append("failed")
+                elif not done:
+                    _status.append("deferred")
+                else:
+                    _status.append("ok")
                 failed += st["failed"]
                 oos += st["oos"]
                 authfail += st["authfail"]
@@ -2487,6 +2521,12 @@ def cmd_probe_body(spec_file, out_jsonl):
                 for rec in recs:
                     out.write(json.dumps(rec, separators=(",", ":")) + "\n")
                     findings += 1
+    if status_file:
+        try:
+            with open(status_file, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(_status) + "\n")
+        except OSError:
+            pass
     print("[*] body probe: %d target(s), %d candidate(s), %d request failure(s), "
           "%d auth failure(s), %d out-of-scope, %d deferred, conc=%d"
           % (targets, findings, failed, authfail, oos, deferred, workers),
@@ -2496,8 +2536,8 @@ def cmd_probe_body(spec_file, out_jsonl):
     if deferred:
         # unfinished targets must stay queued, so the caller aborts the batch
         return 5
-    if failed and findings == 0:
-        # nothing usable and requests failed: keep the jobs queued for retry
+    if failed:
+        # some injection points were not tested: caller keeps only those queued
         return 6
     return 0 if oos == 0 else 3
 
@@ -2890,6 +2930,18 @@ def cmd_verify_reset(db):
 
 
 # -------------------------------------------------------------------- exports
+def cmd_meta_incr(db, key):
+    c = connect(db)
+    ensure(c)
+    try:
+        cur = int(meta_get(c, key, "0") or 0)
+    except Exception:
+        cur = 0
+    meta_set(c, key, cur + 1)
+    print(cur + 1)
+    return 0
+
+
 def cmd_meta_get(db, key):
     c = connect(db)
     ensure(c)
@@ -2916,7 +2968,7 @@ def cmd_export(db, out_file):
         for (blob,) in c.execute(
                 "SELECT json FROM findings"
                 " WHERE COALESCE(context,'') NOT IN"
-                " ('json_data','gone','non_html','escaped','blocked')"
+                " ('json_data','gone','non_html','escaped','blocked','script_string')"
                 " ORDER BY id"):
             fh.write(blob + "\n")
             n += 1
@@ -2995,6 +3047,15 @@ def cmd_ctxfilter(db, keep="0"):
                     r"<style\b.*?</style>"):
             stripped = re.sub(pat, "", stripped, flags=re.I | re.S)
         hit_html = any(m in stripped for m in markers)
+        if hit_html:
+            no_script = re.sub(r"<script\b.*?</script>", "", stripped, flags=re.I | re.S)
+            if any(m in stripped for m in markers) and not any(m in no_script for m in markers):
+                breakout = any(";alert" in m for m in markers) and any(
+                    ('"' in m or "'" in m) for m in markers)
+                if not breakout:
+                    dropped += 1
+                    c.execute("UPDATE findings SET context='script_string' WHERE id=?", (fid,))
+                    continue
         if not hit_html and _only_escaped(markers, stripped):
             dropped += 1
             c.execute("UPDATE findings SET context='escaped' WHERE id=?", (fid,))
@@ -3070,6 +3131,10 @@ def cmd_coverage(db, out_file):
                           and src_fail == 0)
     verification_complete = (verify_requested == 1 and att_open == 0 and att_err == 0
                              and capped == 0 and unplanned == 0)
+    try:
+        detection_batches = int(meta_get(c, "detection_batches", "0") or 0)
+    except Exception:
+        detection_batches = 0
     tests_executed = (urls.get("done", 0) + sum(
         v for (k, st), v in jobs.items() if k == "path" and st == "done") + sum(
         v for (k, st), v in jobs.items() if k in ("form", "json") and st == "done"))
@@ -3085,6 +3150,7 @@ def cmd_coverage(db, out_file):
         "SELECT COUNT(*) FROM discovery WHERE source='forms' AND status='failed'").fetchone()[0]
     rep = {
         "tests_executed": tests_executed,
+        "detection_batches": detection_batches,
         "discovery_failed_sources": src_fail_cov,
         "forms_pages_failed": forms_failed_cov,
         "generated": now(),
@@ -3120,7 +3186,8 @@ def cmd_coverage(db, out_file):
         "body_complete": body_open == 0,
         "verification_complete": verification_complete,
         "work_complete": work_complete,
-        "complete": work_complete and verification_complete and tests_executed > 0,
+        "complete": (work_complete and verification_complete
+                     and tests_executed > 0 and detection_batches > 0),
     }
     with open(out_file, "w", encoding="utf-8") as fh:
         json.dump(rep, fh, indent=2, sort_keys=True)
@@ -3160,7 +3227,7 @@ def _dispatch(argv):
         "verify-report": cmd_verify_report,
         "verify-reset": cmd_verify_reset, "discovery-set": cmd_discovery_set,
         "discovery-status": cmd_discovery_status, "discovery-done": cmd_discovery_done,
-        "discovery-pending": cmd_discovery_pending, "meta-set": cmd_meta_set, "meta-get": cmd_meta_get, "promote-jobs": cmd_promote_jobs, "promote-urls": cmd_promote_urls, "requeue-host": cmd_requeue_host,
+        "discovery-pending": cmd_discovery_pending, "meta-set": cmd_meta_set, "meta-get": cmd_meta_get, "meta-incr": cmd_meta_incr, "promote-jobs": cmd_promote_jobs, "promote-urls": cmd_promote_urls, "requeue-host": cmd_requeue_host,
         "export-confirmed": cmd_export_confirmed,
     }
     rc_cmds = {

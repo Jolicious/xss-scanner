@@ -221,14 +221,33 @@ if problems:
     print()
 
 if ALL and refuted:
-    print(DIM("REFUTED — verified, no execution  (%d)" % len(refuted)))
+    print(DIM("EXECUTION NOT OBSERVED — tested payloads  (%d)" % len(refuted)))
     for d in row_limit(sorted(refuted, key=lambda x: x.get("url", ""))):
         print(DIM("  ✗ " + d.get("url", "?")[:140]))
     print()
 
 if not groups and not manual:
     if cov.get("verification_requested"):
-        print(DIM("no confirmed findings and no manual candidates in this run"))
+        # never hide remaining candidates just because nothing was confirmed
+        cand = [r for r in results if r.get("template-id") != "reflected-body-xss"]
+        if cand:
+            print(YELLOW("UNCONFIRMED CANDIDATES  (%d)" % len(cand)))
+            seen = set()
+            shown = 0
+            for r in cand:
+                u = r.get("matched-at") or r.get("url") or ""
+                base = route(u)
+                if base in seen:
+                    continue
+                seen.add(base)
+                print("  " + DIM("• ") + base + DIM("  via " + str(r.get("template-id"))))
+                shown += 1
+                if LIMIT > 0 and shown >= LIMIT:
+                    print(DIM("  ... %d more (use --limit 0)" % (len(cand) - shown)))
+                    break
+            print(DIM("  not proven XSS: verification ran and did not observe execution"))
+        else:
+            print(DIM("no confirmed findings and no candidates left to verify in this run"))
     else:
         cand = [r for r in results if r.get("template-id") != "reflected-body-xss"]
         print(YELLOW("CANDIDATES ONLY  (%d)" % len(cand)))
