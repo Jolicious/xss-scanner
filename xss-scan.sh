@@ -760,8 +760,9 @@ host_progress() {
     cnt=$(python3 "$QHELPER" host-status "$Q" "$OUT/hosts.txt" \
           "$OUT/hosts-done.txt" "$OUT/hosts-completed.log" "$OUT/urls-done.txt" \
           2>>"$LOGS/hosts.log")
-    [ "${PER_HOST_CHILD:-0}" = 1 ] && return 0
-    if [ -n "$cnt" ] && [ "$cnt" != "$HOSTS_DONE_LAST" ]; then
+    # children must still RECORD completion (parent merges hosts-done.txt);
+    # only the progress line is parent-only
+    if [ "${PER_HOST_CHILD:-0}" != 1 ] && [ -n "$cnt" ] && [ "$cnt" != "$HOSTS_DONE_LAST" ]; then
       HOSTS_DONE_LAST="$cnt"
       echo "[*] hosts complete: $cnt" >&3
     fi

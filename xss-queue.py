@@ -1095,8 +1095,12 @@ def cmd_host_status(db, hosts_file, done_file, log_file="", urls_done_file=""):
     # so the host is not complete even when no URL/job is queued
     blocked = set()
     for key, status, source in c.execute("SELECT key,status,source FROM discovery"):
-        if status not in ("partial", "processing", "failed"):
-            continue
+        # a parked source ('failed') is terminal and recorded as degraded; only
+        # work that can still progress may block a host, plus a failed alive
+        # probe because scope is then unknown
+        if status not in ("partial", "processing"):
+            if not (source == "httpx" and status == "failed"):
+                continue
         k = str(key or "")
         h = ""
         if "://" in k:
