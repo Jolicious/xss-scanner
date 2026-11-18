@@ -67,6 +67,10 @@ NON_REPORTABLE = ("json_data", "gone", "non_html", "escaped", "blocked", "script
 REPORTABLE_SQL = ("COALESCE(context,'') NOT IN (%s)"
                   % ",".join("'%s'" % c for c in NON_REPORTABLE))
 MANUAL_TEMPLATES = ("reflected-body-xss",)
+# a browser asks for markup, a scanner asks for anything: the same endpoint can
+# answer JSON to a tool and XML/XHTML to a browser, which flips executability
+BROWSER_ACCEPT = {"Accept": "text/html,application/xhtml+xml,"
+                            "application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"}
 COMMON_PARAMS = ["p", "q", "id", "page", "site", "url", "file", "name",
                  "search", "query", "level", "product", "version"]
 TOKEN_RE = re.compile(r"XSS_CONFIRMED_[0-9a-f]{12}")
@@ -259,14 +263,22 @@ def _headers():
     return h
 
 
-def http_request(url, allowed, method="GET", data=None, ctype=None):
-    """Single request with scope enforcement and no redirect following."""
+def http_request(url, allowed, method="GET", data=None, ctype=None,
+                 extra_headers=None):
+    """Single request with scope enforcement and no redirect following.
+
+    extra_headers lets callers mirror a browser's Accept header: content
+    negotiation changes what the server returns (JSON for */*, XML/XHTML for a
+    browser), and that decides whether a reflected payload is executable.
+    """
     out = {"url": url, "status": 0, "error": "", "ctype": "", "body": "",
            "redirect": ""}
     if not in_scope(url, allowed):
         out["error"] = "out_of_scope"
         return out
     headers = _headers()
+    if extra_headers:
+        headers.update(extra_headers)
     if ctype:
         headers["Content-Type"] = ctype
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -1413,6 +1425,43 @@ def cmd_api_reflect(db, out_file, limit="300"):
                 lines.append("CANDIDATE (html) %s param=%s status=%s"
                              % (sp.path, pairs[0][0], res["status"]))
                 lines.append("    %s" % target)
+                continue
+        # A non-HTML document can still execute injected markup: an XML or XHTML
+        # response turns a raw <svg onload=...> into a live element, and a JSON
+        # body served to a browser Accept can be rendered as markup. Probe with a
+        # browser-style Accept and an SVG payload; only a verbatim (unescaped)
+        # element counts, an encoded copy is data.
+        lctype = ctype.lower()
+        if any(t in lctype for t in ("xml", "json", "html", "text/plain")):
+            svg_token = "zx%08x" % secrets.randbelow(1 << 32)
+            svg_payload = ("<svg xmlns='http://www.w3.org/2000/svg' onload='"
+                           "this.dataset.%s=1'/>" % svg_token)
+            starget = up.urlunsplit((sp.scheme, sp.netloc, sp.path,
+                                     up.urlencode([(pairs[0][0], svg_payload)]),
+                                     sp.fragment))
+            sres = http_request(starget, allowed, "GET", extra_headers=BROWSER_ACCEPT)
+            sbody = sres["body"] or ""
+            raw_svg = ("<svg xmlns=" in sbody or "<svg xmlns='" in sbody
+                       or "<svg/onload=" in sbody or "<svg onload=" in sbody)
+            if raw_svg and ("dataset." + svg_token) in sbody \
+                    and 0 < sres["status"] < 500:
+                key = (sp.netloc.lower(), sp.path, pairs[0][0])
+                if key not in seen_ins:
+                    seen_ins.add(key)
+                    c.execute("INSERT OR IGNORE INTO findings(template_id,url,param,sig,"
+                              "json,created,config_id,context) VALUES(?,?,?,?,?,?,?,?)",
+                              ("reflected-api-xml", starget, pairs[0][0],
+                               "api-xml|%s" % pairs[0][0],
+                               json.dumps({"template-id": "reflected-api-xml",
+                                           "matched-at": starget,
+                                           "param": pairs[0][0],
+                                           "type": "http"}),
+                               now(), _config_id(c), "api-xml"))
+                    c.commit()
+                    lines.append("CANDIDATE (xml xss) %s param=%s ctype=%s status=%s"
+                                 % (sp.path, pairs[0][0],
+                                    (sres["ctype"] or "?").split(";")[0], sres["status"]))
+                    lines.append("    %s" % starget)
                 continue
         lines.append("REFLECT %s param=%s ctype=%s status=%s"
                      % (sp.path, pairs[0][0], ctype, res["status"]))
@@ -2858,11 +2907,19 @@ def _variant_for(value):
 
 def _payload(variant, token):
     js = _js_string(token)
+    # In an inline handler `this` is the injected element, so the marker lands on
+    # the svg itself: that survives documents where document.body is null (XML)
+    # and still works for HTML. Variant 2 runs inside a JS string, where `this`
+    # is not the element, so it keeps document.body.
+    d = "this"
+    ns = "http://www.w3.org/2000/svg"
     return {
-        0: '"><svg/onload=document.body.dataset.pwn=%s>' % js,
-        1: "'><svg/onload=document.body.dataset.pwn=%s>" % js,
+        # variant 0 is the XML-safe one: single-quoted, self-closing element, so
+        # it is well formed both in HTML and in an XML document that escapes "
+        0: '"><svg xmlns=\'%s\' onload=\'%s.dataset.pwn=%s\'/>' % (ns, d, js),
+        1: "'><svg xmlns=\"%s\" onload=\"%s.dataset.pwn=%s\"/>" % (ns, d, js),
         2: '";document.body.dataset.pwn=%s//' % js,
-        3: "' onmouseover=document.body.dataset.pwn=%s x='" % js,
+        3: "' onmouseover=%s.dataset.pwn=%s x='" % (d, js),
     }[variant]
 
 
