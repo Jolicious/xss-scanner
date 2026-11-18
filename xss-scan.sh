@@ -443,12 +443,12 @@ run_per_host() {
     PTMO="${PER_HOST_TIMEOUT:-0}"
     if [ "$PTMO" -gt 0 ]; then
       timeout --foreground "$PTMO" \
-        env PER_HOST_CHILD=1 FORCE_CONFIG="$CFORCE" PRESEED_ALIVE=1 ALIVE_PARTIAL="$ALIVE_PARTIAL" SEED_FILE="$_cfseeds" bash "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} -i "$cf" -o "$part" \
+        env PER_HOST_CHILD=1 PH_JOBS="$PH_JOBS" FORCE_CONFIG="$CFORCE" PRESEED_ALIVE=1 ALIVE_PARTIAL="$ALIVE_PARTIAL" SEED_FILE="$_cfseeds" nice -n 10 bash "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} -i "$cf" -o "$part" \
         >&3 2>>"$OUT/logs/per-host.log"
       prc=$?
       [ "$prc" -eq 124 ] && warn "per-host: $(tr '\n' ' ' < "$cf") hit ${PTMO}s budget; partial results kept"
     else
-      env PER_HOST_CHILD=1 FORCE_CONFIG="$CFORCE" PRESEED_ALIVE=1 ALIVE_PARTIAL="$ALIVE_PARTIAL" SEED_FILE="$_cfseeds" bash "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} -i "$cf" -o "$part" \
+      env PER_HOST_CHILD=1 PH_JOBS="$PH_JOBS" FORCE_CONFIG="$CFORCE" PRESEED_ALIVE=1 ALIVE_PARTIAL="$ALIVE_PARTIAL" SEED_FILE="$_cfseeds" nice -n 10 bash "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} -i "$cf" -o "$part" \
         >&3 2>>"$OUT/logs/per-host.log"
       prc=$?
     fi
@@ -499,15 +499,24 @@ run_per_host() {
   ph_status & PH_SPID=$!
 
   WPIDS=()
+  # kill -0 is not enough: a finished pid can be recycled by an unrelated
+  # process and then hold a slot open forever. Check that the pid is still a
+  # direct child of this shell before it counts against the budget.
+  ph_child_alive() {
+    [ -r "/proc/$1/stat" ] || return 1
+    [ "$(awk '{print $4}' "/proc/$1/stat" 2>/dev/null)" = "$$" ]
+  }
   for cf in "$hostf"/h.*; do
     [ -s "$cf" ] || { rm -f "$cf"; continue; }
-    # throttle on worker pids only: the status loop is not a worker
+    # HARD CAP: a new host is only started once a running host has finished
+    # scanning AND merging. Some boxes cannot take more than N hosts at once.
     while :; do
-      RUNNING=0
+      _keep=()
       for _p in ${WPIDS[@]+"${WPIDS[@]}"}; do
-        kill -0 "$_p" 2>/dev/null && RUNNING=$((RUNNING + 1))
+        ph_child_alive "$_p" && _keep+=("$_p")
       done
-      [ "$RUNNING" -lt "$PH_JOBS" ] && break
+      WPIDS=(${_keep[@]+"${_keep[@]}"})
+      [ "${#WPIDS[@]}" -lt "$PH_JOBS" ] && break
       sleep 1
     done
     # helper files must not share the chunk prefix, or the resume glob
@@ -875,14 +884,22 @@ sed -E 's#:[0-9]+$##' "$OUT/hosts.txt" | sort -u > "$OUT/gau-hosts.txt"
 export XSS_SCOPE_HOSTS="$OUT/hosts.txt"
 
 # ---- auto tuning: size the run to the scope and the disk, no flags needed ----
-if [ "$RATE_SET" = 0 ]; then
-  if [ "${PER_HOST_CHILD:-0}" = 1 ]; then
-    # single-domain crawl+scan: slower on purpose, aggressive rates make sites
-    # throttle and the crawl then returns almost nothing
-    [ -z "${RATE_ENV:-}" ] && RATE=5
-    [ -z "${CONC_ENV:-}" ] && CONC=2
-    THREADS=10
-  elif [ "$N_HOSTS" -ge 1000 ]; then RATE=25; CONC=8;  THREADS=60
+if [ "${PER_HOST_CHILD:-0}" = 1 ]; then
+  # single-domain crawl+scan: slower on purpose, aggressive rates make sites
+  # throttle and the crawl then returns almost nothing
+  [ "$RATE_SET" = 0 ] && RATE=5
+  [ "$CONC_SET" = 0 ] && CONC=2
+  THREADS=10
+  # workers share one machine and one uplink: divide the budget instead of
+  # multiplying it, so N hosts cost the same as one
+  _pj="${PH_JOBS:-3}"
+  case "$_pj" in ''|*[!0-9]*|0) _pj=3;; esac
+  if [ "$_pj" -gt 1 ]; then
+    RATE=$(( RATE / _pj )); [ "$RATE" -lt 2 ] && RATE=2
+    CONC=$(( CONC / _pj )); [ "$CONC" -lt 1 ] && CONC=1
+  fi
+elif [ "$RATE_SET" = 0 ]; then
+  if [ "$N_HOSTS" -ge 1000 ]; then RATE=25; CONC=8;  THREADS=60
   elif [ "$N_HOSTS" -ge 200 ]; then RATE=40; CONC=10; THREADS=80
   else                              RATE=60; CONC=12; THREADS=50
   fi
@@ -1178,8 +1195,22 @@ EOS
         if [ "$grc" = 0 ] && [ "$irc" = 0 ]; then
           python3 "$QHELPER" discovery-set "$Q" gau "$ggh" done 0
         elif [ "$grc" = 124 ]; then
-          warn "gau timed out for $ggh (partial results kept)"
-          python3 "$QHELPER" discovery-set "$Q" gau "$ggh" partial 124
+          # a host that always times out gau must eventually become terminal,
+          # or every resume re-runs it and the host never completes
+          mkdir -p "$OUT/.gau-tries"
+          _gs=$(printf '%s' "$ggh" | tr '/: ' '___')
+          _gf="$OUT/.gau-tries/$_gs"
+          _gn=$(cat "$_gf" 2>/dev/null || echo 0)
+          case "${_gn:-0}" in ''|*[!0-9]*) _gn=0;; esac
+          _gn=$((_gn + 1))
+          printf '%s\n' "$_gn" > "$_gf"
+          if [ "$_gn" -ge 2 ]; then
+            warn "gau timed out twice for $ggh; parking it as failed"
+            python3 "$QHELPER" discovery-set "$Q" gau "$ggh" failed 124
+          else
+            warn "gau timed out for $ggh (partial results kept, retry $_gn/2)"
+            python3 "$QHELPER" discovery-set "$Q" gau "$ggh" partial 124
+          fi
         else
           warn "gau rc=$grc ingest rc=$irc for $ggh"
           python3 "$QHELPER" discovery-set "$Q" gau "$ggh" failed "$grc"

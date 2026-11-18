@@ -3446,6 +3446,15 @@ def cmd_why(db):
         reasons.append("no tests executed")
     if not d.get("detection_batches"):
         reasons.append("no detection batch recorded")
+    if d.get("complete"):
+        deg = d.get("discovery_degraded_sources") or 0
+        if deg:
+            reasons.append("degraded discovery source(s)=%s (parked after retry)"
+                           % deg)
+        print("complete: no blocking counters (nothing_to_test=%s)%s"
+              % (d.get("nothing_to_test"),
+                 "; " + "; ".join(reasons) if reasons else ""))
+        return 0
     print("blocked by: " + ("; ".join(reasons) if reasons else "nothing obvious"))
     return 0
 
@@ -3500,13 +3509,26 @@ def cmd_coverage(db, out_file):
     # endpoints may be missing, so completion must not be claimed
     src_fail = c.execute(
         "SELECT COUNT(*) FROM discovery WHERE status='failed'"
-        " AND source IN ('httpx','katana','gau','js','sitemap')").fetchone()[0]
+        " AND source IN ('katana','gau','js','sitemap')").fetchone()[0]
+    # still-retrying discovery work, plus a failed alive probe (scope unknown),
+    # is what legitimately blocks a host from being called complete
+    disc_blocking = c.execute(
+        "SELECT COUNT(*) FROM discovery WHERE status IN ('partial','processing')"
+        " OR (source='httpx' AND status='failed')").fetchone()[0]
     forms_failed = c.execute("SELECT COUNT(*) FROM discovery WHERE source='forms'"
                              " AND status='failed'").fetchone()[0]
-    discovery_complete = (all(s in ("done", "failed") for s in disc) and bool(disc)
-                          and src_fail == 0)
-    verification_complete = (verify_requested == 1 and att_open == 0 and att_err == 0
-                             and capped == 0 and unplanned == 0)
+    urls_total = sum(urls.values())
+    nothing_to_test = (urls_total == 0
+                       and not jobs
+                       and src_fail == 0
+                       and att_open == 0
+                       and not any(st not in ("done", "failed") for st in disc))
+    discovery_complete = (all(st in ("done", "failed") for st in disc)
+                          and (bool(disc) or nothing_to_test)
+                          and disc_blocking == 0)
+    verification_complete = (verify_requested == 0
+                             or (att_open == 0 and att_err == 0
+                                 and capped == 0 and unplanned == 0))
     try:
         detection_batches = int(meta_get(c, "detection_batches", "0") or 0)
     except Exception:
@@ -3521,13 +3543,14 @@ def cmd_coverage(db, out_file):
                                    " WHERE strategy='append-heuristic'").fetchone()[0]
     src_fail_cov = c.execute(
         "SELECT COUNT(*) FROM discovery WHERE status='failed'"
-        " AND source IN ('httpx','katana','gau','js','sitemap')").fetchone()[0]
+        " AND source IN ('katana','gau','js','sitemap')").fetchone()[0]
     forms_failed_cov = c.execute(
         "SELECT COUNT(*) FROM discovery WHERE source='forms' AND status='failed'").fetchone()[0]
     rep = {
         "tests_executed": tests_executed,
         "detection_batches": detection_batches,
         "discovery_failed_sources": src_fail_cov,
+        "discovery_degraded_sources": src_fail_cov,
         "forms_pages_failed": forms_failed_cov,
         "generated": now(),
         "urls": {k: urls.get(k, 0) for k in ("pending", "inflight", "done", "failed",
@@ -3578,8 +3601,10 @@ def cmd_coverage(db, out_file):
         "body_complete": body_open == 0,
         "verification_complete": verification_complete,
         "work_complete": work_complete,
-        "complete": (work_complete and verification_complete
-                     and tests_executed > 0 and detection_batches > 0),
+        "nothing_to_test": nothing_to_test,
+        "complete": ((work_complete and verification_complete
+                      and tests_executed > 0 and detection_batches > 0)
+                     or nothing_to_test),
     }
     with open(out_file, "w", encoding="utf-8") as fh:
         json.dump(rep, fh, indent=2, sort_keys=True)
