@@ -23,7 +23,7 @@ http://127.0.0.1:$PORT/pos/jsbreak?q=1
 http://127.0.0.1:$PORT/neg/escaped?q=1
 EOF
 
-setsid "$SCAN" -i "$W/list.txt" -o "$W/out" --per-host --no-notify --no-forms-post \
+setsid "$SCAN" -i "$W/list.txt" -o "$W/out" --per-host --no-notify --no-forms-post --no-gau \
   > "$W/first.log" 2>&1 &
 PID=$!
 sleep 12
@@ -31,7 +31,7 @@ kill -TERM -"$PID" 2>/dev/null || kill -TERM "$PID" 2>/dev/null
 wait "$PID" 2>/dev/null
 echo "interrupted (signal sent)"
 
-"$SCAN" -i "$W/list.txt" -o "$W/out" --per-host --no-notify --no-forms-post --continue \
+"$SCAN" -i "$W/list.txt" -o "$W/out" --per-host --no-notify --no-forms-post --no-gau --continue \
   > "$W/second.log" 2>&1
 RC=$?
 echo "resume rc=$RC"

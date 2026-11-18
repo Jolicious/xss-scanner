@@ -1085,6 +1085,12 @@ def cmd_host_status(db, hosts_file, done_file, log_file="", urls_done_file=""):
     for i, h in enumerate(hosts):
         order.setdefault(_host_key(h), i)
     scope = set(order)
+    # host:port -> same set keyed by bare host, so a discovery key without the
+    # port (gau strips it) still maps onto the scoped host
+    scope_base = {}
+    for k in scope:
+        base = k.split(":")[0] if k.count(":") == 1 else k
+        scope_base.setdefault(base, set()).add(k)
     pending = {}
     done = {}
     for url, state in c.execute("SELECT url,state FROM urls"):
@@ -1123,6 +1129,8 @@ def cmd_host_status(db, hosts_file, done_file, log_file="", urls_done_file=""):
             h = _host_key("http://" + k)      # bare-host sources such as gau
         if h in scope:
             blocked.add(h)
+        elif h and h in scope_base:
+            blocked.update(scope_base[h])
         elif not h:
             # chunk ids and global sources: affected hosts are not derivable,
             # so stay conservative and block the whole scope
