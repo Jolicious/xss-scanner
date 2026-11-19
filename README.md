@@ -5,6 +5,9 @@ headless verification → report/notify, with resumable state in SQLite.
 
 Authorized testing only.
 
+> [!NOTE]
+> **Disclaimer:** This tool does not guarantee the detection of all Cross-Site Scripting (XSS) vulnerabilities. A clean scan result does not necessarily mean the target is free from XSS. Manual testing and additional security assessments are recommended.
+
 ## Requirements
 
 ```
