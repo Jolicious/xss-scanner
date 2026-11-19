@@ -69,7 +69,12 @@ set -uo pipefail
 exec 3>&1
 ORIG_ARGS=("$@")
 
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# resolve symlinks: an install as /usr/local/bin/xss-scan -> /opt/... must still
+# find xss-queue.py and the templates next to the real script
+SELF_SRC="${BASH_SOURCE[0]}"
+SELF_REAL="$(readlink -f "$SELF_SRC" 2>/dev/null || printf '%s' "$SELF_SRC")"
+[ -n "$SELF_REAL" ] || SELF_REAL="$SELF_SRC"
+SELF_DIR="$(cd "$(dirname "$SELF_REAL")" && pwd)"
 # go-installed tools (gau, katana, httpx, nuclei) live in ~/go/bin and are
 # usually absent from non-interactive PATH (cron, systemd, CI)
 export PATH="$HOME/go/bin:/usr/local/bin:/opt/bugbounty-tools:$PATH"
