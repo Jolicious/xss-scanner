@@ -209,7 +209,7 @@ while [ $# -gt 0 ]; do
     --no-sitemap)     DO_SITEMAP=0; shift;;
     --api-reflections) API_REFLECT=1; shift;;
     --param-mine)     PARAM_MINE=1; shift;;
-    --param-mine-max) PARAM_MINE_MAX="${2:-40}"; shift 2;;
+    --param-mine-max) PARAM_MINE_MAX="${2:-20}"; shift 2;;
     --param-mine-words) PARAM_MINE_WORDS="${2:-}"; shift 2;;
     --param-mine-params) PARAM_MINE_PARAMS="${2:-12}"; shift 2;;
     --no-requeue-throttled) DO_REQUEUE_THROTTLED=0; shift;;
@@ -1553,7 +1553,7 @@ if [ "$PARAM_MINE" = 1 ]; then
     if [ ! -s "$PM_WORDS" ]; then
       warn "param-mine: wordlist missing: $PM_WORDS (skipped)"
     else
-      PM_MAX="${PARAM_MINE_MAX:-40}"
+      PM_MAX="${PARAM_MINE_MAX:-20}"
       { grep -Ei '^https?://[^ ]+$' "$OUT/pages.txt" 2>/dev/null || true; } \
         | grep -v '[?]' | awk '!seen[$0]++' | head -n "$PM_MAX" > "$OUT/.pm-bases.txt"
       PM_N=$(wc -l < "$OUT/.pm-bases.txt" | tr -d ' ')
