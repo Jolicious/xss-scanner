@@ -27,7 +27,11 @@ while [ $# -gt 0 ]; do
     *) ARGS+=("$1"); shift;;
   esac
 done
-[ -n "$OUT" ] || { echo "[-] -o <dir> is required" >&2; exit 2; }
+# no -o: nothing to supervise (the scanner would invent a timestamped dir and
+# a restart would create a second one), so run once and pass the exit code on
+if [ -z "$OUT" ]; then
+  exec "$SCAN" "${ARGS[@]}"
+fi
 [ "$HAVE_CONTINUE" = 1 ] || ARGS+=("--continue")
 
 log() { printf '[supervise %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
