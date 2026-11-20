@@ -164,7 +164,7 @@ DO_GAU=1; DO_CRAWL=1; DO_VERIFY=0; DO_FORMS=1; DO_JS=1
 VERIFY_EXPLICIT=0; RATE_SET=0; CONC_SET=0; DISK_SET=0; NOTIFY_EXPLICIT=0
 ACCEPT_FAILED=0
 COMPACT=0; RESUME=1; CONTINUE=0; RECHECK=0; RETRY_FAILED=0; STRICT=1; REDISCOVER=0
-SILENT=0; PER_HOST=0; PER_HOST_CHUNK=1; PER_HOST_JOBS=3; DO_REQUEUE_THROTTLED=1; DO_SITEMAP=1; API_REFLECT=0; PARAM_MINE=0
+SILENT=0; PER_HOST=0; PER_HOST_CHUNK=1; PER_HOST_JOBS=3; DO_REQUEUE_THROTTLED=1; DO_SITEMAP=1; API_REFLECT=0; PARAM_MINE=1
 REVERIFY=0; FORCE_CONFIG="${FORCE_CONFIG:-0}"; AMEND_LIMITS=0; DO_REPORT=1
 NOTIFY=0; NOTIFY_SUMMARY=0; NOTIFY_LIVE=1; NOTIFY_SENT_ANY=0; NOTIFY_IDS=(); NOTIFY_CANDIDATES=1
 NOTIFY_CONFIG="${NOTIFY_CONFIG:-$HOME/.config/notify/provider-config.yaml}"
@@ -209,7 +209,8 @@ while [ $# -gt 0 ]; do
     --no-sitemap)     DO_SITEMAP=0; shift;;
     --api-reflections) API_REFLECT=1; shift;;
     --param-mine)     PARAM_MINE=1; shift;;
-    --param-mine-max) PARAM_MINE_MAX="${2:-20}"; shift 2;;
+    --no-param-mine)  PARAM_MINE=0; shift;;
+    --param-mine-max) PARAM_MINE_MAX="${2:-5}"; shift 2;;
     --param-mine-words) PARAM_MINE_WORDS="${2:-}"; shift 2;;
     --param-mine-params) PARAM_MINE_PARAMS="${2:-12}"; shift 2;;
     --no-requeue-throttled) DO_REQUEUE_THROTTLED=0; shift;;
@@ -1553,7 +1554,7 @@ if [ "$PARAM_MINE" = 1 ]; then
     if [ ! -s "$PM_WORDS" ]; then
       warn "param-mine: wordlist missing: $PM_WORDS (skipped)"
     else
-      PM_MAX="${PARAM_MINE_MAX:-20}"
+      PM_MAX="${PARAM_MINE_MAX:-5}"
       { grep -Ei '^https?://[^ ]+$' "$OUT/pages.txt" 2>/dev/null || true; } \
         | grep -v '[?]' | awk '!seen[$0]++' | head -n "$PM_MAX" > "$OUT/.pm-bases.txt"
       PM_N=$(wc -l < "$OUT/.pm-bases.txt" | tr -d ' ')
@@ -1562,7 +1563,7 @@ if [ "$PARAM_MINE" = 1 ]; then
         stage "params"
         timeout --foreground "${PARAM_MINE_TIMEOUT:-900}" python3 "$QHELPER" param-mine \
           "$OUT/.pm-bases.txt" "$PM_WORDS" "$OUT/.pm-out.txt" \
-          "${PARAM_MINE_CONC:-6}" "${PARAM_MINE_BUDGET:-300}" \
+          "${PARAM_MINE_CONC:-6}" "${PARAM_MINE_BUDGET:-120}" \
           "${PARAM_MINE_PARAMS:-12}" 2>>"$LOGS/param-mine.log"
         PM_RC=$?
         if [ -s "$OUT/.pm-out.txt" ]; then
