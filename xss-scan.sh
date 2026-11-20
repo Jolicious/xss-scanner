@@ -67,6 +67,10 @@
 
 set -uo pipefail
 exec 3>&1
+# ProjectDiscovery tools read stdin when it is not a tty: over ssh/nohup that is
+# an open pipe that never reaches EOF, so httpx/nuclei sit in read(0) forever
+# and the scan looks hung. Input always comes from -i, never stdin.
+if [ ! -t 0 ]; then exec 0</dev/null; fi
 ORIG_ARGS=("$@")
 
 # resolve symlinks: an install as /usr/local/bin/xss-scan -> /opt/... must still
