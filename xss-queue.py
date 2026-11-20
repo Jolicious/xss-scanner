@@ -1366,6 +1366,130 @@ def cmd_new_candidates(db, out_file, marker_file="cand-notified.id", key_file=""
     return 0
 
 
+def cmd_param_mine(spec_file, wordlist, out_file, conc="8", budget="300",
+                   per_page="12"):
+    """Discover hidden query parameters by reflection probing.
+
+    Crawlers only see parameters that appear in a URL somewhere. Portals accept
+    many more (loginError, redirect, p_p_id, ...), and a parameter that changes
+    the response is worth a detection pass. Each base URL is probed with a
+    unique marker; a name counts as discovered when its marker comes back raw or
+    url-encoded, which is the same signal XSS needs.
+    """
+    import urllib.parse as up
+    from concurrent.futures import ThreadPoolExecutor
+
+    allowed = load_policy(SCOPE_FILE)
+    if not allowed:
+        print("[-] param-mine: scope policy missing/empty", file=sys.stderr)
+        return 2
+    try:
+        nconc = max(1, int(conc))
+    except Exception:
+        nconc = 8
+    try:
+        tbudget = float(budget)
+    except Exception:
+        tbudget = 300.0
+    try:
+        cap = int(per_page)
+    except Exception:
+        cap = 12
+    if cap <= 0:
+        cap = 12
+
+    names = []
+    try:
+        with open(wordlist, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                n = line.strip()
+                if not n or n.startswith("#") or "=" in n:
+                    continue
+                names.append(n)
+    except OSError as exc:
+        print("[-] param-mine: wordlist unreadable: %r" % (exc,), file=sys.stderr)
+        return 1
+    if not names:
+        print("[-] param-mine: empty wordlist", file=sys.stderr)
+        return 1
+
+    bases = []
+    try:
+        with open(spec_file, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                u = line.strip()
+                if u.startswith("http://") or u.startswith("https://"):
+                    bases.append(u)
+    except OSError:
+        return 1
+    if not bases:
+        open(out_file, "w").close()
+        print(0, file=sys.stderr)
+        return 0
+
+    def probe(base):
+        marker = "zxq%08x" % secrets.randbelow(1 << 32)
+        enc_marker = up.quote(marker, safe="")
+        sp = up.urlsplit(base)
+        found = []
+        try:
+            base_res = http_request(base, allowed, "GET")
+        except Exception:
+            base_res = None
+        base_len = len(base_res["body"] or "") if base_res else 0
+        for name in names:
+            if len(found) >= cap:
+                break
+            q = up.parse_qsl(sp.query, keep_blank_values=True) + [(name, marker)]
+            url = up.urlunsplit((sp.scheme, sp.netloc, sp.path,
+                                 up.urlencode(q), sp.fragment))
+            res = http_request(url, allowed, "GET")
+            if res["error"] or not res["body"]:
+                continue
+            body = res["body"]
+            raw = marker in body
+            enc = enc_marker in body and not raw
+            if not raw and not enc:
+                continue
+            # a page that echoes every query string is noise: require the marker
+            # to sit next to the parameter name we sent, or to change the body
+            near = False
+            for pat in (name + "=" + marker, name + "%3D" + enc_marker,
+                        name + "%253D" + enc_marker):
+                if pat in body:
+                    near = True
+                    break
+            if not near and abs(len(body) - base_len) == 0:
+                continue
+            found.append(name)
+        return found
+
+    started = time.time()
+    lines = []
+    with ThreadPoolExecutor(max_workers=nconc) as pool:
+        futs = []
+        for b in bases:
+            if tbudget > 0 and (time.time() - started) > tbudget:
+                break
+            futs.append((pool.submit(probe, b), b))
+        for fut, base in futs:
+            try:
+                found = fut.result()
+            except Exception:
+                continue
+            sp = up.urlsplit(base)
+            for name in found:
+                q = up.parse_qsl(sp.query, keep_blank_values=True) + [(name, "1")]
+                lines.append(up.urlunsplit((sp.scheme, sp.netloc, sp.path,
+                                            up.urlencode(q), sp.fragment)))
+
+    with open(out_file, "w", encoding="utf-8") as fh:
+        for u in lines:
+            fh.write(u + chr(10))
+    print(len(lines), file=sys.stderr)
+    return 0
+
+
 def cmd_api_reflect(db, out_file, limit="300"):
     """Report payload echoes from API-style endpoints (JSON/text responses).
 
@@ -2914,7 +3038,12 @@ def _variant_for(value):
 
 
 def _payload(variant, token):
-    js = _js_string(token)
+    # String.fromCharCode trips signature WAFs (seen as 500 on the whole request),
+    # which turns a real sink into a false negative. An HTML entity carries the
+    # same literal token through the attribute: the browser decodes it to a
+    # quoted string once executed, and a raw reflected copy still differs from
+    # the serialized `data-pwn="TOKEN"` the verifier looks for.
+    js = '&#34;%s&#34;' % token if token else '1'
     # In an inline handler `this` is the injected element, so the marker lands on
     # the svg itself: that survives documents where document.body is null (XML)
     # and still works for HTML. Variant 2 runs inside a JS string, where `this`
@@ -3703,6 +3832,7 @@ def _dispatch(argv):
         "show-findings": cmd_show_findings, "show-confirmed": cmd_show_confirmed,
         "confirmed-new": cmd_confirmed_new, "api-reflect": cmd_api_reflect,
         "new-candidates": cmd_new_candidates, "escaped-report": cmd_escaped_report,
+        "param-mine": cmd_param_mine,
         "blocked-report": cmd_blocked_report,
         "live-watch": cmd_live_watch, "host-status": cmd_host_status,
         "merge-run": cmd_merge_run,

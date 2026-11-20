@@ -38,6 +38,11 @@ http:
           - '%27%3E%3Csvg%2Fonload%3Dalert(1)%3E'
           - '%3C%2Fscript%3E%3Csvg%2Fonload%3Dalert(1)%3E'
           - '%22%3E%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E'
+          # WAF-tolerant variants: many filters block the literal alert(1) and
+          # answer 403/500, which hides a real reflection from every scanner
+          - '%22%3E%3Cimg%20src%3Dx%20onerror%3Dalert()%3E'
+          - '%22%3E%3Cimg%20src%3Dx%20onerror%3Dalert(document.domain)%3E'
+          - '%22%3E%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20onload%3D%27this.dataset.pwn%3D1%27%2F%3E'
 
     matchers-condition: and
     matchers:
@@ -49,6 +54,9 @@ http:
           - "'><svg/onload=alert(1)>"
           - '</script><svg/onload=alert(1)>'
           - '"><img src=x onerror=alert(1)>'
+          - '<img src=x onerror=alert()>'
+          - '<img src=x onerror=alert(document.domain)>'
+          - "<svg xmlns='http://www.w3.org/2000/svg' onload="
 
       - type: status
         negative: true
