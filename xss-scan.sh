@@ -1566,6 +1566,33 @@ if [ "$PARAM_MINE" = 1 ]; then
           "${PARAM_MINE_CONC:-6}" "${PARAM_MINE_BUDGET:-120}" \
           "${PARAM_MINE_PARAMS:-12}" 2>>"$LOGS/param-mine.log"
         PM_RC=$?
+        # Guarded routes (login/error, logout, redirect) are usually not linked
+        # from anywhere, so no crawler ever finds them. Probe the common ones
+        # with the high-value head of the wordlist, which keeps a404 storm and
+        # request count bounded.
+        if [ -s "$SELF_DIR/routes.txt" ]; then
+          PM_ROUTES="${PARAM_MINE_ROUTES:-25}"
+          head -n "$PM_ROUTES" "$SELF_DIR/routes.txt" > "$OUT/.pm-routes.txt"
+          head -n "${PARAM_MINE_TOP:-40}" "$PM_WORDS" > "$OUT/.pm-top.txt"
+          : > "$OUT/.pm-routebases.txt"
+          while IFS= read -r _pmh; do
+            case "$_pmh" in ''|'#'*) continue;; esac
+            case "$_pmh" in http://*|https://*) ;; *) _pmh="https://$_pmh";; esac
+            while IFS= read -r _pmr; do
+              [ -n "$_pmr" ] && printf '%s%s\n' "${_pmh%/}" "$_pmr"
+            done < "$OUT/.pm-routes.txt"
+          done < "$OUT/hosts.txt" >> "$OUT/.pm-routebases.txt"
+          PM_RB=$(wc -l < "$OUT/.pm-routebases.txt" | tr -d ' ')
+          if [ "${PM_RB:-0}" -gt 0 ]; then
+            timeout --foreground "${PARAM_MINE_TIMEOUT:-900}" python3 "$QHELPER" param-mine \
+              "$OUT/.pm-routebases.txt" "$OUT/.pm-top.txt" "$OUT/.pm-route-out.txt" \
+              "${PARAM_MINE_CONC:-6}" "${PARAM_MINE_BUDGET:-120}" \
+              "${PARAM_MINE_PARAMS:-8}" 2>>"$LOGS/param-mine.log" || true
+            [ -s "$OUT/.pm-route-out.txt" ] && cat "$OUT/.pm-route-out.txt" >> "$OUT/.pm-out.txt"
+            echo "[*] param mine: $PM_RB guarded route(s) probed"
+          fi
+          rm -f "$OUT/.pm-routes.txt" "$OUT/.pm-top.txt" "$OUT/.pm-routebases.txt" "$OUT/.pm-route-out.txt"
+        fi
         if [ -s "$OUT/.pm-out.txt" ]; then
           PM_HITS=$(wc -l < "$OUT/.pm-out.txt" | tr -d ' ')
           ingest < "$OUT/.pm-out.txt" 2>>"$LOGS/param-mine.log" || true
